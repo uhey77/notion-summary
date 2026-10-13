@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   SlackClient,
+  buildDigestMessages,
   buildSummaryMessage,
   markdownToMrkdwn,
+  markdownToPlainText,
   splitForSection,
 } from "../src/services/slack.js";
 import { createFetchMock } from "./helpers/fetchMock.js";
@@ -79,6 +81,64 @@ describe("buildSummaryMessage", () => {
   });
 });
 
+describe("buildDigestMessages", () => {
+  const items = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      pageId: `p${i}`,
+      title: `記事${i}`,
+      summaryMarkdown: `- 要点${i}`,
+      url: `https://notion.so/p${i}`,
+      category: "cat",
+      author: `著者${i}`,
+    }));
+
+  it("1通に収まる場合は header + 連番の各記事 section を返す (作成者表示)", () => {
+    const parts = buildDigestMessages({ count: 2, items: items(2), itemMaxChars: 700 });
+    expect(parts).toHaveLength(1);
+    const rendered = JSON.stringify(parts[0].message.blocks);
+    expect(rendered).toContain("今日の更新記事: 2件");
+    expect(rendered).toContain("*1. 記事0*");
+    expect(rendered).toContain("*2. 記事1*");
+    expect(rendered).toContain("👤 *最終更新者：著者0*");
+    expect(parts[0].message.text).toContain("👤 最終更新者：著者0");
+    expect(parts[0].pageIds).toEqual(["p0", "p1"]);
+  });
+
+  it("旧itemMaxCharsを超えても全文を表示する", () => {
+    const long = [
+      {
+        pageId: "p",
+        title: "t",
+        summaryMarkdown: "x".repeat(500),
+        url: "u",
+        category: "c",
+        author: "a",
+      },
+    ];
+    const parts = buildDigestMessages({ count: 1, items: long, itemMaxChars: 50 });
+    const section = (
+      parts[0].message.blocks as Array<{ type: string; text?: { text: string } }>
+    ).find((b) => b.type === "section");
+    expect(section?.text?.text).toContain("x".repeat(500));
+  });
+
+  it("上限超過で複数パートに分割し、pageIds を網羅・header に (k/total)", () => {
+    const many = Array.from({ length: 11 }, (_, i) => ({
+      pageId: `p${i}`,
+      title: `記事${i}`,
+      summaryMarkdown: "x".repeat(3000),
+      url: "u",
+      category: "c",
+      author: "a",
+    }));
+    const parts = buildDigestMessages({ count: 11, items: many, itemMaxChars: 3000 });
+    expect(parts.length).toBeGreaterThan(1);
+    const allIds = parts.flatMap((p) => p.pageIds).sort();
+    expect(allIds).toEqual(many.map((m) => m.pageId).sort());
+    expect(JSON.stringify(parts[0].message.blocks)).toContain("(1/");
+  });
+});
+
 describe("SlackClient.postToChannels", () => {
   const message = { text: "t", blocks: [] };
 
@@ -112,4 +172,61 @@ describe("SlackClient.postToChannels", () => {
     expect(results[0]).toEqual({ channel: "C1", ok: false, error: "channel_not_found" });
     expect(results[1]).toEqual({ channel: "C2", ok: true, ts: "222.2" });
   });
+});
+
+describe("digest plain text", () => {
+  it("日本語の強調記号を除去し、箇条書きを維持する", () => {
+    expect(markdownToPlainText("## 要点\n- **Slack**と*Notion*を導入する。")).toBe(
+      "要点\n• SlackとNotionを導入する。",
+    );
+  });
+
+  it("本文とプレビューで装飾を除去し、Notionリンクを維持する", () => {
+    const [part] = buildDigestMessages({
+      count: 1,
+      itemMaxChars: 200,
+      items: [
+        {
+          pageId: "p",
+          title: "オンボーディング",
+          author: "田辺",
+          category: "c",
+          summaryMarkdown: "- **Slack**は*コミュニケーション*に使う。",
+          url: "https://notion.so/p",
+        },
+      ],
+    });
+    expect(JSON.stringify(part.message.blocks)).toContain("• Slackはコミュニケーションに使う。");
+    expect(JSON.stringify(part.message.blocks)).toContain("<https://notion.so/p|Notion で開く>");
+    expect(part.message.text).not.toContain("*");
+    expect(part.message.text).toContain("Notion で開く: https://notion.so/p");
+  });
+});
+
+it("長い記事を削らず分割し、最後のパートでのみ配信済みにする", () => {
+  const summary = `${"あ".repeat(31000)}最後の要点。`;
+  const parts = buildDigestMessages({
+    count: 1,
+    itemMaxChars: 200,
+    items: [
+      {
+        pageId: "long",
+        title: "長文",
+        summaryMarkdown: summary,
+        url: "https://notion.so/long",
+        category: "c",
+        author: "更新者",
+      },
+    ],
+  });
+  const sections = parts
+    .flatMap((p) => p.message.blocks as Array<{ type: string; text?: { text: string } }>)
+    .filter((b) => b.type === "section");
+  const rendered = sections.map((b) => b.text?.text).join("");
+  expect(rendered).toContain(summary);
+  expect(rendered).toContain("<https://notion.so/long|Notion で開く>");
+  expect(sections.every((b) => (b.text?.text.length ?? 0) <= 2800)).toBe(true);
+  expect(parts.length).toBeGreaterThan(1);
+  expect(parts.slice(0, -1).flatMap((p) => p.pageIds)).toEqual([]);
+  expect(parts.at(-1)?.pageIds).toEqual(["long"]);
 });

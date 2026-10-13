@@ -45,6 +45,8 @@ interface FetchContext {
 
 export class NotionClient {
   private readonly fetchImpl: typeof fetch;
+  /** user id -> name の同一 invocation 内キャッシュ (最終更新者名の重複解決を避ける)。 */
+  private readonly userNameCache = new Map<string, string>();
 
   constructor(private readonly opts: NotionClientOptions) {
     // Workers ではグローバル fetch をメソッド呼び出しすると this がずれて
@@ -77,7 +79,22 @@ export class NotionClient {
       url: typeof page.url === "string" ? page.url : "",
       lastEditedTime: typeof page.last_edited_time === "string" ? page.last_edited_time : "",
       parentDatabaseId: extractParentDatabaseId(page),
+      lastEditedById: extractLastEditedById(page),
     };
+  }
+
+  /**
+   * user id から表示名を解決する (最終更新者名の表示用)。
+   * ページ本体の last_edited_by は id のみ (partial user) なので Users API で名前を引く。
+   * 同一 invocation 内はキャッシュし、名前が取れなければ空文字を返す。
+   */
+  async getUserName(userId: string): Promise<string> {
+    const cached = this.userNameCache.get(userId);
+    if (cached !== undefined) return cached;
+    const user = await this.request<Record<string, unknown>>(`/v1/users/${userId}`);
+    const name = typeof user.name === "string" ? user.name : "";
+    this.userNameCache.set(userId, name);
+    return name;
   }
 
   /** 親 DB のタイトル (カテゴリ表示用)。取得失敗・無題なら undefined。 */
@@ -197,6 +214,16 @@ function extractParentDatabaseId(page: Record<string, unknown>): string | undefi
     if (p.type === "database_id" && typeof p.database_id === "string") {
       return p.database_id;
     }
+  }
+  return undefined;
+}
+
+/** ページの created_by (partial user) から最終更新者 user id を抽出する。 */
+function extractLastEditedById(page: Record<string, unknown>): string | undefined {
+  const createdBy = page.last_edited_by;
+  if (createdBy && typeof createdBy === "object") {
+    const id = (createdBy as Record<string, unknown>).id;
+    if (typeof id === "string" && id.length > 0) return id;
   }
   return undefined;
 }

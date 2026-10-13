@@ -14,6 +14,10 @@ const SLACK_POST_URL = "https://slack.com/api/chat.postMessage";
 const HEADER_TITLE_MAX = 140;
 const SECTION_TEXT_MAX = 2800;
 const FALLBACK_TEXT_MAX = 3000;
+// ダイジェスト分割の上限。Slack の blocks(<=50) / 全体サイズに対し余裕をもたせる。
+const MAX_BLOCKS_PER_MESSAGE = 45;
+const MAX_TEXT_PER_MESSAGE = 28000;
+const DIGEST_HEADER = "今日の更新記事";
 
 export interface SummaryMessageInput {
   title: string;
@@ -27,6 +31,31 @@ export interface SummaryMessageInput {
 export interface SlackMessage {
   text: string;
   blocks: unknown[];
+}
+
+/** ダイジェスト 1 記事分の入力。 */
+export interface DigestItemInput {
+  pageId: string;
+  title: string;
+  /** Gemini が生成した Markdown 要約本文。 */
+  summaryMarkdown: string;
+  url: string;
+  category: string;
+  author: string;
+}
+
+export interface DigestMessageInput {
+  /** 全記事数 (header 表示用。分割しても総数を出す)。 */
+  count: number;
+  items: DigestItemInput[];
+  /** 互換性のため残す旧設定。本文の切り詰めには使用しない。 */
+  itemMaxChars: number;
+}
+
+/** 1 通のダイジェストメッセージと、それが載せた記事の pageId 群。 */
+export interface DigestPart {
+  message: SlackMessage;
+  pageIds: string[];
 }
 
 export class SlackClient {
@@ -100,6 +129,79 @@ export function buildSummaryMessage(input: SummaryMessageInput): SlackMessage {
 
   const text = truncate(`要約: ${input.title}\n${mrkdwn}`, FALLBACK_TEXT_MAX);
   return { text, blocks };
+}
+
+/**
+ * 日次ダイジェストを Slack メッセージ (複数可) へ組み立てる。
+ * 記事数/文字数が Slack の上限 (blocks<=50 / 全体サイズ) を超える場合は複数メッセージへ分割する。
+ * 記事番号はパートをまたいで連番 (1..count)。各パートは載せた記事の pageId 群を返し、
+ * 呼び出し側 (consumer) がパート単位で配信済みマークを付けられるようにする。
+ */
+export function buildDigestMessages(input: DigestMessageInput): DigestPart[] {
+  // 本文は削らず、Slack の section 制限に合わせて分割する。
+  const itemBlocks = input.items.flatMap((item, i) => {
+    const summary = markdownToPlainText(item.summaryMarkdown);
+    const text = `*${i + 1}. ${item.title}*\n👤 *最終更新者：${item.author}*\n${summary}\n<${item.url}|Notion で開く>`;
+    const chunks = splitForSection(text, SECTION_TEXT_MAX);
+    return chunks.map((text, index) => ({
+      text,
+      // 記事の最後の部分が送信できた時点で配信済みにする。
+      pageId: index === chunks.length - 1 ? item.pageId : undefined,
+    }));
+  });
+
+  // greedy パッキング: 各パートは header(1 block) + 記事 sections。
+  // block 数・累積文字数のどちらかが上限を超えたら新しいパートへ。
+  const groups: { texts: string[]; pageIds: string[]; chars: number }[] = [];
+  for (const ib of itemBlocks) {
+    const last = groups[groups.length - 1];
+    if (
+      last === undefined ||
+      last.texts.length >= MAX_BLOCKS_PER_MESSAGE - 1 || // header 1 block 分を差し引く
+      last.chars + ib.text.length > MAX_TEXT_PER_MESSAGE
+    ) {
+      groups.push({
+        texts: [ib.text],
+        pageIds: ib.pageId ? [ib.pageId] : [],
+        chars: ib.text.length,
+      });
+    } else {
+      last.texts.push(ib.text);
+      if (ib.pageId) last.pageIds.push(ib.pageId);
+      last.chars += ib.text.length;
+    }
+  }
+
+  const total = groups.length;
+  return groups.map((group, idx) => {
+    const headerText =
+      total > 1
+        ? `${DIGEST_HEADER}: ${input.count}件 (${idx + 1}/${total})`
+        : `${DIGEST_HEADER}: ${input.count}件`;
+    const blocks: unknown[] = [
+      {
+        type: "header",
+        text: { type: "plain_text", text: truncate(headerText, HEADER_TITLE_MAX), emoji: true },
+      },
+      ...group.texts.map((text) => ({ type: "section", text: { type: "mrkdwn", text } })),
+    ];
+    const fallback = truncate(
+      `${headerText}\n${group.texts.map((text) => markdownToPlainText(text).replace(/<([^>|]+)\|([^>]+)>/g, "$2: $1")).join("\n\n")}`,
+      FALLBACK_TEXT_MAX,
+    );
+    return { message: { text: fallback, blocks }, pageIds: group.pageIds };
+  });
+}
+
+/** 要約の装飾を取り除き、Slack 本文と通知プレビューで読める文章にする。 */
+export function markdownToPlainText(markdown: string): string {
+  return markdownToMrkdwn(markdown)
+    .replace(/```(?:[^\n`]*\n)?([\s\S]*?)```/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)")
+    .replace(/\*+([^*\n]+)\*+/g, "$1")
+    .replace(/_+([^_\n]+)_+/g, "$1")
+    .replace(/~~([^~\n]+)~~/g, "$1");
 }
 
 /**

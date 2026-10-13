@@ -26,10 +26,14 @@ describe("upsertPageState (軽量)", () => {
   it("既存行は debounce/status のみ更新し latest_last_edited_time は保持する", async () => {
     await db.upsertPageState({ pageId: "p1", debounceUntil: "d1", now: "n1" });
     // 要約完了で latest を記録した状態を作る
-    await db.markPageCompleted({
+    await db.markPageSummarized({
       pageId: "p1",
       lastEditedTime: "2026-06-06T09:00:00.000Z",
       summary: "s",
+      title: "t",
+      url: "u",
+      category: "c",
+      author: "a",
       expectedDebounceUntil: "d1",
       now: "n1",
     });
@@ -189,22 +193,30 @@ describe("summary_jobs", () => {
   });
 });
 
-describe("markPageCompleted", () => {
+describe("markPageSummarized", () => {
   beforeEach(async () => {
     await db.upsertPageState({ pageId: "p1", debounceUntil: "DEB1", now: "n" });
   });
 
-  it("debounce_until が想定どおりなら completed にし、版と要約を記録する", async () => {
-    await db.markPageCompleted({
+  it("debounce_until が想定どおりなら summarized にし、版・要約・メタを記録する", async () => {
+    await db.markPageSummarized({
       pageId: "p1",
       lastEditedTime: "2026-06-06T10:00:00.000Z",
       summary: "要約本文",
+      title: "記事タイトル",
+      url: "https://notion.so/p1",
+      category: "研究",
+      author: "田中",
       expectedDebounceUntil: "DEB1",
       now: "2026-06-06T10:01:00.000Z",
     });
     const row = await db.getPageState("p1");
-    expect(row?.status).toBe("completed");
+    expect(row?.status).toBe("summarized");
     expect(row?.last_summary).toBe("要約本文");
+    expect(row?.last_title).toBe("記事タイトル");
+    expect(row?.last_url).toBe("https://notion.so/p1");
+    expect(row?.last_category).toBe("研究");
+    expect(row?.last_author).toBe("田中");
     expect(row?.latest_last_edited_time).toBe("2026-06-06T10:00:00.000Z");
     expect(row?.lock_until).toBeNull();
   });
@@ -212,16 +224,63 @@ describe("markPageCompleted", () => {
   it("処理中に debounce_until が変わっていたら pending のまま残す (取りこぼし防止)", async () => {
     // 新しい Webhook が来て debounce_until が変わった状況
     await db.upsertPageState({ pageId: "p1", debounceUntil: "DEB2", now: "n2" });
-    await db.markPageCompleted({
+    await db.markPageSummarized({
       pageId: "p1",
       lastEditedTime: "2026-06-06T10:00:00.000Z",
       summary: "要約本文",
+      title: "t",
+      url: "u",
+      category: "c",
+      author: "a",
       expectedDebounceUntil: "DEB1", // 拾った時点の値 (今は DEB2)
       now: "n3",
     });
     const row = await db.getPageState("p1");
-    expect(row?.status).toBe("pending"); // completed にしない
+    expect(row?.status).toBe("pending"); // summarized にしない
     expect(row?.latest_last_edited_time).toBe("2026-06-06T10:00:00.000Z"); // 版は記録
+  });
+});
+
+describe("getSummarizedPages", () => {
+  it("summarized のみを last_summarized_at 昇順で返す", async () => {
+    await db.upsertPageState({ pageId: "a", debounceUntil: "DEB", now: "n" });
+    await db.upsertPageState({ pageId: "b", debounceUntil: "DEB", now: "n" });
+    await db.upsertPageState({ pageId: "c", debounceUntil: "DEB", now: "n" });
+    // a: 08:00, b: 07:00 に要約済み / c は pending のまま
+    await db.markPageSummarized({
+      pageId: "a",
+      lastEditedTime: "x",
+      summary: "sa",
+      title: "A",
+      url: "u",
+      category: "c",
+      author: "au",
+      expectedDebounceUntil: "DEB",
+      now: "2026-06-06T08:00:00.000Z",
+    });
+    await db.markPageSummarized({
+      pageId: "b",
+      lastEditedTime: "x",
+      summary: "sb",
+      title: "B",
+      url: "u",
+      category: "c",
+      author: "au",
+      expectedDebounceUntil: "DEB",
+      now: "2026-06-06T07:00:00.000Z",
+    });
+    const rows = await db.getSummarizedPages();
+    expect(rows.map((r) => r.page_id)).toEqual(["b", "a"]); // 昇順
+  });
+});
+
+describe("app_state", () => {
+  it("未設定は null、set 後に get で往復し、同キーは上書きする", async () => {
+    expect(await db.getAppState("last_digest_time")).toBeNull();
+    await db.setAppState("last_digest_time", "2026-06-06T00:00:00.000Z", "n");
+    expect(await db.getAppState("last_digest_time")).toBe("2026-06-06T00:00:00.000Z");
+    await db.setAppState("last_digest_time", "2026-06-07T00:00:00.000Z", "n2");
+    expect(await db.getAppState("last_digest_time")).toBe("2026-06-07T00:00:00.000Z");
   });
 });
 

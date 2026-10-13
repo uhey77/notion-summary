@@ -13,6 +13,10 @@ interface PageStateRow {
   lock_until: string | null;
   last_summarized_at: string | null;
   last_summary: string | null;
+  last_title: string | null;
+  last_url: string | null;
+  last_category: string | null;
+  last_author: string | null;
   slack_ts: string | null;
   retry_count: number;
   error_message: string | null;
@@ -23,6 +27,7 @@ interface PageStateRow {
 export class FakeD1 {
   pageStates = new Map<string, PageStateRow>();
   jobs = new Map<string, Record<string, unknown>>();
+  appState = new Map<string, string>();
 
   asD1(): D1Database {
     return this as unknown as D1Database;
@@ -69,6 +74,10 @@ class FakeStatement {
       }
       return latest as T | null;
     }
+    if (sql.startsWith("SELECT value FROM app_state")) {
+      const value = this.d1.appState.get(this.args[0] as string);
+      return (value === undefined ? null : { value }) as T | null;
+    }
     throw new Error(`FakeD1: unsupported first() query: ${sql}`);
   }
 
@@ -86,6 +95,12 @@ class FakeStatement {
         .sort((a, b) => a.debounce_until.localeCompare(b.debounce_until))
         .slice(0, limit);
       return { results: due as T[] };
+    }
+    if (sql.startsWith("SELECT * FROM page_state WHERE status = 'summarized'")) {
+      const rows = [...this.d1.pageStates.values()]
+        .filter((r) => r.status === "summarized")
+        .sort((a, b) => (a.last_summarized_at ?? "").localeCompare(b.last_summarized_at ?? ""));
+      return { results: rows as T[] };
     }
     throw new Error(`FakeD1: unsupported all() query: ${sql}`);
   }
@@ -111,6 +126,10 @@ class FakeStatement {
           lock_until: null,
           last_summarized_at: null,
           last_summary: null,
+          last_title: null,
+          last_url: null,
+          last_category: null,
+          last_author: null,
           slack_ts: null,
           retry_count: 0,
           error_message: null,
@@ -118,6 +137,12 @@ class FakeStatement {
           updated_at: now,
         });
       }
+      return changes(1);
+    }
+
+    if (sql.startsWith("INSERT INTO app_state")) {
+      const [key, value] = this.args as string[];
+      this.d1.appState.set(key, value);
       return changes(1);
     }
 
@@ -165,14 +190,30 @@ class FakeStatement {
     }
 
     if (sql.startsWith("UPDATE page_state SET status = CASE WHEN debounce_until")) {
-      // markPageCompleted: bind(expectedDebounceUntil, lastEditedTime, summary, now, now, pageId)
-      const [expected, lastEdited, summary, summarizedAt, now, pageId] = this.args as string[];
+      // markPageSummarized:
+      // bind(expectedDebounceUntil, lastEditedTime, summary, title, url, category, author, now, now, pageId)
+      const [
+        expected,
+        lastEdited,
+        summary,
+        title,
+        url,
+        category,
+        author,
+        summarizedAt,
+        now,
+        pageId,
+      ] = this.args as string[];
       const row = this.d1.pageStates.get(pageId);
       if (!row) return changes(0);
       // 処理中に debounce_until が変わっていたら pending のまま残す。
-      row.status = row.debounce_until === expected ? "completed" : "pending";
+      row.status = row.debounce_until === expected ? "summarized" : "pending";
       row.latest_last_edited_time = lastEdited;
       row.last_summary = summary;
+      row.last_title = title;
+      row.last_url = url;
+      row.last_category = category;
+      row.last_author = author;
       row.last_summarized_at = summarizedAt;
       row.lock_until = null;
       row.error_message = null;

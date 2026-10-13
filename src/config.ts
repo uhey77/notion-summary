@@ -9,7 +9,7 @@ const DEFAULTS = {
   notionEventTypes: "page.content_updated,page.created",
   summaryDelaySeconds: 600,
   summaryMinIntervalSeconds: 1800,
-  geminiModel: "gemini-3.1-flash-lite",
+  geminiModel: "gemini-3.8-flash",
   summaryLength: "medium" as SummaryLength,
   summaryStyle: "bullet" as SummaryStyle,
   notionPageSize: 100,
@@ -20,6 +20,8 @@ const DEFAULTS = {
   logLevel: "INFO" as LogLevel,
   summaryMaxRetries: 3,
   cronMaxPages: 3,
+  digestItemMaxChars: 700,
+  digestMaxRetries: 2,
 } as const;
 
 const VALID_LENGTHS: readonly SummaryLength[] = ["short", "medium", "long"];
@@ -86,9 +88,14 @@ export function loadConfig(env: Env): AppConfig {
     logLevel,
     summaryMaxRetries: parsePositiveInt(env.SUMMARY_MAX_RETRIES, DEFAULTS.summaryMaxRetries),
     cronMaxPages: parsePositiveInt(env.CRON_MAX_PAGES, DEFAULTS.cronMaxPages),
+    digestItemMaxChars: parsePositiveInt(env.DIGEST_ITEM_MAX_CHARS, DEFAULTS.digestItemMaxChars),
+    digestMaxRetries: parsePositiveInt(env.DIGEST_MAX_RETRIES, DEFAULTS.digestMaxRetries),
     notionApiToken: env.NOTION_API_TOKEN,
     notionWebhookToken: env.NOTION_WEBHOOK_TOKEN,
     geminiApiKey: env.GEMINI_API_KEY,
+    vertexApiKey: env.VERTEX_API_KEY,
+    geminiProvider: env.GEMINI_PROVIDER === "vertex" ? "vertex" : "gemini",
+    vertexProjectId: env.VERTEX_PROJECT_ID?.trim() || undefined,
     slackBotToken: env.SLACK_BOT_TOKEN,
     slackChannelIds: parseCsv(env.SLACK_SUMMARY_CHANNEL_ID),
   };

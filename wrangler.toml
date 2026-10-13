@@ -14,12 +14,14 @@ preview_urls = false
 [vars]
 NOTION_VERSION = "2022-06-28"
 NOTION_EVENT_TYPES = "page.content_updated,page.created"
-# デバウンス: 最後の編集から 600 秒 (10分) 通知が無ければ要約
+# デバウンス: 最後の編集から10分待つ
 SUMMARY_DELAY_SECONDS = "600"
-# クールダウン: 前回要約から 1800 秒 (30分) は次の要約を出さない
+# クールダウン: 同じページの再要約は最低30分空ける
 SUMMARY_MIN_INTERVAL_SECONDS = "1800"
-GEMINI_MODEL = "gemini-3.1-flash-lite"
-SUMMARY_LENGTH = "medium"
+GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_PROVIDER = "vertex"
+VERTEX_PROJECT_ID = "notion-summary-510913"
+SUMMARY_LENGTH = "short"
 SUMMARY_STYLE = "bullet"
 # 無料 (Workers Free) 前提で subrequest 上限 (1実行50) に収めるため控えめに設定
 NOTION_PAGE_SIZE = "100"
@@ -28,14 +30,19 @@ NOTION_MAX_BLOCKS = "800"
 NOTION_MAX_MARKDOWN_CHARS = "30000"
 LOG_LEVEL = "INFO"
 DEBUG_VERBOSE = "false"
-# 失敗ジョブの最大リトライ回数 (D1 retry_count ベース)
+# 失敗ジョブの最大リトライ回数 (D1 retry_count ベース = 初回 + 2 リトライ)
 SUMMARY_MAX_RETRIES = "3"
-# 1 回の Cron 実行で処理するページ数 (subrequest 枠を超えないよう小さめ)
+# 1 回の要約フェーズで処理するページ数 (subrequest 枠を超えないよう小さめ)
 CRON_MAX_PAGES = "3"
+# ダイジェスト 1 記事あたりの要約表示上限文字数
+DIGEST_ITEM_MAX_CHARS = "200"
+# ダイジェスト Slack 投稿の実行内リトライ回数
+DIGEST_MAX_RETRIES = "2"
 
-# --- Cron Trigger: Queue の代替。毎分 due なページを処理する ---
+# --- Cron Trigger ---
+# 要約は15分間隔、Slack通知は毎朝9時（日本時間、UTC 0時）。
 [triggers]
-crons = ["* * * * *"]
+crons = ["5,20,35,50 * * * *", "0 0 * * *"]
 
 # --- D1: デバウンス状態・実行履歴・要約結果 ---
 # database_id は `wrangler d1 create notion-summarizer-db` で発行した実 ID に差し替える。

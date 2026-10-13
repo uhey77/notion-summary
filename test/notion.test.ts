@@ -47,6 +47,8 @@ describe("getPageInfo", () => {
               url: "https://notion.so/page-1",
               last_edited_time: "2026-06-06T10:00:00.000Z",
               parent: { type: "database_id", database_id: "db-9" },
+              created_by: { object: "user", id: "creator" },
+              last_edited_by: { object: "user", id: "user-9" },
               properties: {
                 Name: { type: "title", title: [{ plain_text: "研究ノート" }] },
               },
@@ -61,6 +63,7 @@ describe("getPageInfo", () => {
     expect(info.url).toBe("https://notion.so/page-1");
     expect(info.lastEditedTime).toBe("2026-06-06T10:00:00.000Z");
     expect(info.parentDatabaseId).toBe("db-9");
+    expect(info.lastEditedById).toBe("user-9");
   });
 
   it("title が取れなければ『タイトルなし』", async () => {
@@ -74,6 +77,28 @@ describe("getPageInfo", () => {
     const info = await client.getPageInfo("p");
     expect(info.title).toBe("タイトルなし");
     expect(info.parentDatabaseId).toBeUndefined();
+    expect(info.lastEditedById).toBeUndefined();
+  });
+});
+
+describe("getUserName", () => {
+  it("Users API から名前を返し、同一 id の2回目はキャッシュする", async () => {
+    const fetchImpl = createFetchMock([
+      { match: (u) => u.includes("/v1/users/"), responses: [{ body: { name: "田中太郎" } }] },
+    ]);
+    const client = new NotionClient({ ...BASE_OPTS, fetchImpl });
+    expect(await client.getUserName("user-1")).toBe("田中太郎");
+    expect(await client.getUserName("user-1")).toBe("田中太郎");
+    const calls = (fetchImpl as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.filter((c) => String(c[0]).includes("/v1/users/")).length).toBe(1);
+  });
+
+  it("name が無ければ空文字を返す", async () => {
+    const fetchImpl = createFetchMock([
+      { match: (u) => u.includes("/v1/users/"), responses: [{ body: {} }] },
+    ]);
+    const client = new NotionClient({ ...BASE_OPTS, fetchImpl });
+    expect(await client.getUserName("user-2")).toBe("");
   });
 });
 

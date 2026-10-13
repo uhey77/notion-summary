@@ -31,11 +31,18 @@ export interface Env {
   SUMMARY_MAX_RETRIES?: string;
   /** 1 回の Cron 実行で処理するページ数の上限 (無料 subrequest 枠対策。デフォルト 3)。 */
   CRON_MAX_PAGES?: string;
+  /** ダイジェスト 1 記事あたりの要約表示上限文字数 (デフォルト 700)。 */
+  DIGEST_ITEM_MAX_CHARS?: string;
+  /** ダイジェスト Slack 投稿の実行内リトライ回数 (デフォルト 2)。 */
+  DIGEST_MAX_RETRIES?: string;
 
   // --- secrets (wrangler secret put / .dev.vars) ---
   NOTION_API_TOKEN?: string;
   NOTION_WEBHOOK_TOKEN?: string;
   GEMINI_API_KEY?: string;
+  VERTEX_API_KEY?: string;
+  GEMINI_PROVIDER?: string;
+  VERTEX_PROJECT_ID?: string;
   SLACK_BOT_TOKEN?: string;
   SLACK_SUMMARY_CHANNEL_ID?: string;
 }
@@ -61,10 +68,15 @@ export interface AppConfig {
   logLevel: LogLevel;
   summaryMaxRetries: number;
   cronMaxPages: number;
+  digestItemMaxChars: number;
+  digestMaxRetries: number;
   // secrets (存在しない可能性がある — 利用箇所でガードする)
   notionApiToken?: string;
   notionWebhookToken?: string;
   geminiApiKey?: string;
+  vertexApiKey?: string;
+  geminiProvider?: "gemini" | "vertex";
+  vertexProjectId?: string;
   slackBotToken?: string;
   slackChannelIds: string[];
 }
@@ -78,6 +90,8 @@ export interface NotionPageInfo {
   url: string;
   lastEditedTime: string;
   parentDatabaseId?: string;
+  /** 最終更新者の user id (名前は Users API で別途解決する)。 */
+  lastEditedById?: string;
 }
 
 /** Markdown 化された本文と、省略が発生したかどうか。 */

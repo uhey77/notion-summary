@@ -5,7 +5,7 @@
  */
 import { loadConfig } from "./config.js";
 import { Db } from "./db.js";
-import { type ProcessorDeps, processDuePages } from "./handlers/consumer.js";
+import { type ProcessorDeps, processDuePages, runDailyDigest } from "./handlers/consumer.js";
 import { type WebhookDeps, handleWebhook } from "./handlers/webhook.js";
 import { GeminiClient } from "./services/gemini.js";
 import { NotionClient } from "./services/notion.js";
@@ -13,7 +13,7 @@ import { SlackClient } from "./services/slack.js";
 import type { AppConfig, Env } from "./types.js";
 import { createLogger } from "./utils/logger.js";
 
-const DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite";
+const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
 const LOCK_TTL_SECONDS = 120;
 
 function buildNotionClient(config: AppConfig): NotionClient {
@@ -51,11 +51,7 @@ export default {
     return new Response("not found", { status: 404 });
   },
 
-  async scheduled(
-    _controller: ScheduledController,
-    env: Env,
-    ctx: ExecutionContext,
-  ): Promise<void> {
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const config = loadConfig(env);
     const logger = createLogger(config.logLevel);
     const deps: ProcessorDeps = {
@@ -63,7 +59,10 @@ export default {
       db: new Db(env.DB),
       notion: buildNotionClient(config),
       gemini: new GeminiClient({
-        apiKey: config.geminiApiKey ?? "",
+        apiKey:
+          (config.geminiProvider === "vertex" ? config.vertexApiKey : config.geminiApiKey) ?? "",
+        provider: config.geminiProvider,
+        vertexProjectId: config.vertexProjectId,
         model: config.geminiModel,
         defaultModel: DEFAULT_GEMINI_MODEL,
         length: config.summaryLength,
@@ -71,10 +70,16 @@ export default {
       }),
       slack: new SlackClient(config.slackBotToken ?? ""),
       now: () => new Date(),
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       logger,
       maxRetries: config.summaryMaxRetries,
       lockTtlSeconds: LOCK_TTL_SECONDS,
     };
-    ctx.waitUntil(processDuePages(deps));
+    // 通知は毎朝9時（日本時間）のみ。それ以外のCronは要約を保存する。
+    if (controller.cron === "0 0 * * *") {
+      ctx.waitUntil(runDailyDigest(deps));
+    } else {
+      ctx.waitUntil(processDuePages(deps));
+    }
   },
 } satisfies ExportedHandler<Env>;

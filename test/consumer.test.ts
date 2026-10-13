@@ -5,6 +5,7 @@ import {
   formatJst,
   processDuePage,
   processDuePages,
+  runDailyDigest,
 } from "../src/handlers/consumer.js";
 import { GeminiClient } from "../src/services/gemini.js";
 import { NotionClient } from "../src/services/notion.js";
@@ -26,6 +27,8 @@ const PAGE_ROUTE: Route = {
         url: "https://notion.so/page-1",
         last_edited_time: LET,
         parent: { type: "database_id", database_id: "db-1" },
+        created_by: { object: "user", id: "creator" },
+        last_edited_by: { object: "user", id: "user-1" },
         properties: { Name: { type: "title", title: [{ plain_text: "研究ノート" }] } },
       },
     },
@@ -34,6 +37,10 @@ const PAGE_ROUTE: Route = {
 const DB_ROUTE: Route = {
   match: (u) => u.includes("/v1/databases/"),
   responses: [{ body: { title: [{ plain_text: "研究DB" }] } }],
+};
+const USER_ROUTE: Route = {
+  match: (u) => u.includes("/v1/users/"),
+  responses: [{ body: { name: "田中太郎" } }],
 };
 const BLOCKS_ROUTE: Route = {
   match: (u) => u.includes("/children"),
@@ -55,11 +62,14 @@ const SLACK_OK: Route = {
   match: (u) => u.includes("chat.postMessage"),
   responses: [{ body: { ok: true, ts: "1.1" } }],
 };
+// 要約フェーズ用ルート (Slack は含めない = 投稿したら fetchMock が例外を投げるので未投稿の保証になる)。
+const SUMMARIZE_ROUTES = [PAGE_ROUTE, DB_ROUTE, BLOCKS_ROUTE, GEMINI_OK, USER_ROUTE];
 
 interface Ctx {
   fake: FakeD1;
   db: Db;
   deps: ProcessorDeps;
+  fetchMock: typeof fetch;
 }
 
 function buildCtx(options: {
@@ -67,6 +77,8 @@ function buildCtx(options: {
   channels?: string[];
   now?: Date;
   notionDatabaseId?: string;
+  digestItemMaxChars?: number;
+  digestMaxRetries?: number;
 }): Ctx {
   const fetchImpl = createFetchMock(options.routes) as typeof fetch;
   const fake = new FakeD1();
@@ -89,6 +101,8 @@ function buildCtx(options: {
       logLevel: "ERROR",
       summaryMaxRetries: 3,
       cronMaxPages: 3,
+      digestItemMaxChars: options.digestItemMaxChars ?? 700,
+      digestMaxRetries: options.digestMaxRetries ?? 2,
       slackChannelIds: options.channels ?? ["C1"],
     },
     db,
@@ -111,13 +125,15 @@ function buildCtx(options: {
     }),
     slack: new SlackClient("t", fetchImpl),
     now: () => options.now ?? NOW,
+    sleep: async () => {}, // テストでは待たない
     logger: createLogger("ERROR"),
     maxRetries: 3,
     lockTtlSeconds: 120,
   };
-  return { fake, db, deps };
+  return { fake, db, deps, fetchMock: fetchImpl };
 }
 
+/** 要約フェーズ用の pending 行を seed する。 */
 function seedState(
   fake: FakeD1,
   overrides: Partial<{
@@ -125,7 +141,6 @@ function seedState(
     latest: string;
     debounceUntil: string;
     lockUntil: string | null;
-    slackTs: string | null;
     retryCount: number;
   }> = {},
 ): PageStateRow {
@@ -138,7 +153,11 @@ function seedState(
     lock_until: overrides.lockUntil ?? null,
     last_summarized_at: null,
     last_summary: null,
-    slack_ts: overrides.slackTs ?? null,
+    last_title: null,
+    last_url: null,
+    last_category: null,
+    last_author: null,
+    slack_ts: null,
     retry_count: overrides.retryCount ?? 0,
     error_message: null,
     created_at: "x",
@@ -148,76 +167,118 @@ function seedState(
   return row;
 }
 
+/** ダイジェスト用の summarized 行を seed する。 */
+function seedSummarized(
+  fake: FakeD1,
+  opts: {
+    pageId: string;
+    title: string;
+    summary: string;
+    author: string;
+    url?: string;
+    category?: string;
+    summarizedAt?: string;
+  },
+): PageStateRow {
+  const row: PageStateRow = {
+    page_id: opts.pageId,
+    latest_last_edited_time: "2026-06-05T09:00:00.000Z",
+    debounce_until: "2026-06-06T00:00:00.000Z",
+    status: "summarized",
+    lock_until: null,
+    last_summarized_at: opts.summarizedAt ?? "2026-06-06T08:00:00.000Z",
+    last_summary: opts.summary,
+    last_title: opts.title,
+    last_url: opts.url ?? `https://notion.so/${opts.pageId}`,
+    last_category: opts.category ?? "cat",
+    last_author: opts.author,
+    slack_ts: null,
+    retry_count: 0,
+    error_message: null,
+    created_at: "x",
+    updated_at: "x",
+  };
+  fake.pageStates.set(row.page_id, row);
+  return row;
+}
+
+/** fetchMock から chat.postMessage の payload を取り出す。 */
+function postBodies(fetchMock: typeof fetch): Array<{ blocks: unknown[]; text: string }> {
+  const calls = (fetchMock as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls;
+  return calls
+    .filter(([u]) => u.includes("chat.postMessage"))
+    .map(([, init]) => JSON.parse(init.body as string));
+}
+
 describe("formatJst", () => {
   it("UTC を JST へ変換する", () => {
     expect(formatJst("2026-06-06T09:59:00.000Z")).toBe("2026-06-06 18:59 JST");
   });
 });
 
-describe("processDuePages (Cron tick)", () => {
-  it("due なページだけ処理する", async () => {
-    const ctx = buildCtx({ routes: [PAGE_ROUTE, DB_ROUTE, BLOCKS_ROUTE, GEMINI_OK, SLACK_OK] });
+describe("要約フェーズ (processDuePages tick)", () => {
+  it("due なページだけ要約して summarized にする", async () => {
+    const ctx = buildCtx({ routes: SUMMARIZE_ROUTES });
     seedState(ctx.fake); // due
     seedState(ctx.fake, { pageId: "page-2", debounceUntil: "2026-06-06T23:00:00.000Z" }); // not due
     await processDuePages(ctx.deps);
-    expect(ctx.fake.pageStates.get(PAGE_ID)?.status).toBe("completed");
+    expect(ctx.fake.pageStates.get(PAGE_ID)?.status).toBe("summarized");
     expect(ctx.fake.pageStates.get("page-2")?.status).toBe("pending");
   });
 });
 
 describe("lock 競合", () => {
   it("ロック取得失敗なら何もしない", async () => {
-    const ctx = buildCtx({ routes: [PAGE_ROUTE, DB_ROUTE, BLOCKS_ROUTE, GEMINI_OK, SLACK_OK] });
+    const ctx = buildCtx({ routes: SUMMARIZE_ROUTES });
     const state = seedState(ctx.fake, { lockUntil: "2026-06-06T10:12:00.000Z" });
     await processDuePage(state, ctx.deps);
-    expect(ctx.fake.pageStates.get(PAGE_ID)?.status).not.toBe("completed");
-    expect(ctx.fake.pageStates.get(PAGE_ID)?.slack_ts).toBeNull();
+    expect(ctx.fake.pageStates.get(PAGE_ID)?.status).not.toBe("summarized");
   });
 });
 
 describe("still_editing スキップ", () => {
   it("ロック後の再読み込みで debounce_until が未来なら処理しない", async () => {
-    const ctx = buildCtx({ routes: [PAGE_ROUTE, DB_ROUTE, BLOCKS_ROUTE, GEMINI_OK, SLACK_OK] });
+    const ctx = buildCtx({ routes: SUMMARIZE_ROUTES });
     const state = seedState(ctx.fake, { debounceUntil: "2026-06-06T10:20:00.000Z" }); // now より後
     await processDuePage(state, ctx.deps);
-    expect(ctx.fake.pageStates.get(PAGE_ID)?.status).not.toBe("completed");
+    expect(ctx.fake.pageStates.get(PAGE_ID)?.status).not.toBe("summarized");
   });
 });
 
 describe("no_change スキップ (重複防止)", () => {
-  it("前回要約した版と現在の last_edited_time が同じなら Slack 投稿しない", async () => {
-    const ctx = buildCtx({ routes: [PAGE_ROUTE, DB_ROUTE, BLOCKS_ROUTE, GEMINI_OK, SLACK_OK] });
+  it("前回要約した版と現在の last_edited_time が同じなら completed のまま (要約しない)", async () => {
+    const ctx = buildCtx({ routes: SUMMARIZE_ROUTES });
     const state = seedState(ctx.fake, { latest: LET }); // = Notion の現在値
     await processDuePage(state, ctx.deps);
     const row = ctx.fake.pageStates.get(PAGE_ID);
-    expect(row?.slack_ts).toBeNull();
-    expect(row?.status).toBe("completed"); // 既に要約済み版なので completed のまま
+    expect(row?.status).toBe("completed");
+    expect(row?.last_summary).toBeNull();
   });
 });
 
 describe("対象 DB フィルタ (Cron 側)", () => {
   it("親 DB が NOTION_DATABASE_ID と異なれば other_database でスキップ", async () => {
-    const ctx = buildCtx({
-      routes: [PAGE_ROUTE, BLOCKS_ROUTE, GEMINI_OK, SLACK_OK],
-      notionDatabaseId: "db-OTHER",
-    });
+    const ctx = buildCtx({ routes: SUMMARIZE_ROUTES, notionDatabaseId: "db-OTHER" });
     const state = seedState(ctx.fake);
     await processDuePage(state, ctx.deps);
     expect(ctx.fake.pageStates.get(PAGE_ID)?.status).toBe("skipped");
-    expect(ctx.fake.pageStates.get(PAGE_ID)?.slack_ts).toBeNull();
   });
 });
 
-describe("正常系", () => {
-  it("要約して Slack 投稿し completed、版を記録する", async () => {
-    const ctx = buildCtx({ routes: [PAGE_ROUTE, DB_ROUTE, BLOCKS_ROUTE, GEMINI_OK, SLACK_OK] });
+describe("要約フェーズ 正常系", () => {
+  it("要約して summarized にし、メタと作成者を保存する (Slack 投稿しない)", async () => {
+    const ctx = buildCtx({ routes: SUMMARIZE_ROUTES });
     const state = seedState(ctx.fake);
     await processDuePage(state, ctx.deps);
     const row = ctx.fake.pageStates.get(PAGE_ID);
-    expect(row?.status).toBe("completed");
+    expect(row?.status).toBe("summarized");
     expect(row?.last_summary).toBe("要約結果");
+    expect(row?.last_title).toBe("研究ノート");
+    expect(row?.last_url).toBe("https://notion.so/page-1");
+    expect(row?.last_category).toBe("研究DB");
+    expect(row?.last_author).toBe("田中太郎"); // Users API で解決
     expect(row?.latest_last_edited_time).toBe(LET); // 要約した版を記録
-    expect(JSON.parse(row?.slack_ts ?? "{}")).toEqual({ C1: "1.1" });
+    expect(postBodies(ctx.fetchMock)).toHaveLength(0); // Slack 未投稿
   });
 
   it("本文が空なら skipped", async () => {
@@ -229,33 +290,6 @@ describe("正常系", () => {
     const state = seedState(ctx.fake);
     await processDuePage(state, ctx.deps);
     expect(ctx.fake.pageStates.get(PAGE_ID)?.status).toBe("skipped");
-  });
-});
-
-describe("Slack 冪等性", () => {
-  it("一部チャンネル失敗で retry(pending)、成功分は再送しない", async () => {
-    const ctx = buildCtx({
-      channels: ["C1", "C2"],
-      routes: [
-        PAGE_ROUTE,
-        DB_ROUTE,
-        BLOCKS_ROUTE,
-        GEMINI_OK,
-        {
-          match: (u) => u.includes("chat.postMessage"),
-          responses: [
-            { body: { ok: true, ts: "1.1" } },
-            { body: { ok: false, error: "channel_error" } },
-          ],
-        },
-      ],
-    });
-    const state = seedState(ctx.fake);
-    await processDuePage(state, ctx.deps);
-    const row = ctx.fake.pageStates.get(PAGE_ID);
-    expect(row?.status).toBe("pending");
-    expect(row?.retry_count).toBe(1);
-    expect(JSON.parse(row?.slack_ts ?? "{}")).toEqual({ C1: "1.1" });
   });
 });
 
@@ -291,7 +325,7 @@ describe("Gemini エラー", () => {
     expect(ctx.fake.pageStates.get(PAGE_ID)?.status).toBe("failed");
   });
 
-  it("permanent(モデル不可) は Slack 投稿せず failed", async () => {
+  it("permanent(モデル不可) は failed (要約保存しない)", async () => {
     const ctx = buildCtx({
       routes: [
         PAGE_ROUTE,
@@ -307,6 +341,118 @@ describe("Gemini エラー", () => {
     await processDuePage(state, ctx.deps);
     const row = ctx.fake.pageStates.get(PAGE_ID);
     expect(row?.status).toBe("failed");
-    expect(row?.slack_ts).toBeNull();
+    expect(row?.last_summary).toBeNull();
+  });
+});
+
+describe("ダイジェストフェーズ (runDailyDigest)", () => {
+  it("summarized を1通にまとめて投稿し completed + last_digest_time", async () => {
+    const ctx = buildCtx({ routes: [SLACK_OK] });
+    seedSummarized(ctx.fake, { pageId: "p1", title: "記事A", summary: "要約A", author: "山田" });
+    seedSummarized(ctx.fake, { pageId: "p2", title: "記事B", summary: "要約B", author: "鈴木" });
+    await runDailyDigest(ctx.deps);
+
+    const bodies = postBodies(ctx.fetchMock);
+    expect(bodies).toHaveLength(1); // 1通にまとまる
+    const rendered = JSON.stringify(bodies[0].blocks);
+    expect(rendered).toContain("今日の更新記事: 2件");
+    expect(rendered).toContain("記事A");
+    expect(rendered).toContain("記事B");
+    expect(rendered).toContain("山田");
+    expect(rendered).toContain("鈴木");
+    expect(ctx.fake.pageStates.get("p1")?.status).toBe("completed");
+    expect(ctx.fake.pageStates.get("p2")?.status).toBe("completed");
+    expect(ctx.fake.appState.get("last_digest_time")).toBeTruthy();
+  });
+
+  it("summarized が無ければ投稿せず last_digest_time だけ更新", async () => {
+    const ctx = buildCtx({ routes: [SLACK_OK] });
+    await runDailyDigest(ctx.deps);
+    expect(postBodies(ctx.fetchMock)).toHaveLength(0);
+    expect(ctx.fake.appState.get("last_digest_time")).toBeTruthy();
+  });
+
+  it("上限超過で複数メッセージに分割し、全ページを completed にする", async () => {
+    // itemMaxChars を大きくして各 block を SECTION_TEXT_MAX(2800) 近くにし、
+    // 11件 * ~2800 > MAX_TEXT(28000) で2通に割れるようにする。
+    const ctx = buildCtx({ routes: [SLACK_OK], digestItemMaxChars: 3000 });
+    for (let i = 0; i < 11; i++) {
+      seedSummarized(ctx.fake, {
+        pageId: `p${i}`,
+        title: `記事${i}`,
+        summary: "x".repeat(3000),
+        author: "著者",
+        summarizedAt: `2026-06-06T08:00:${String(i).padStart(2, "0")}.000Z`,
+      });
+    }
+    await runDailyDigest(ctx.deps);
+
+    const bodies = postBodies(ctx.fetchMock);
+    expect(bodies.length).toBeGreaterThan(1); // 分割された
+    for (let i = 0; i < 11; i++) {
+      expect(ctx.fake.pageStates.get(`p${i}`)?.status).toBe("completed");
+    }
+    expect(ctx.fake.appState.get("last_digest_time")).toBeTruthy();
+  });
+
+  it("Slack 投稿失敗時はリトライし、成功すれば completed", async () => {
+    const ctx = buildCtx({
+      routes: [
+        {
+          match: (u) => u.includes("chat.postMessage"),
+          responses: [
+            { body: { ok: false, error: "rate_limited" } }, // 1回目失敗
+            { body: { ok: true, ts: "1.1" } }, // 2回目成功
+          ],
+        },
+      ],
+    });
+    seedSummarized(ctx.fake, { pageId: "p1", title: "A", summary: "a", author: "x" });
+    await runDailyDigest(ctx.deps);
+    expect(postBodies(ctx.fetchMock).length).toBe(2); // リトライで2回投稿
+    expect(ctx.fake.pageStates.get("p1")?.status).toBe("completed");
+    expect(ctx.fake.appState.get("last_digest_time")).toBeTruthy();
+  });
+
+  it("全リトライ失敗なら summarized 据え置き・last_digest_time 未設定", async () => {
+    const ctx = buildCtx({
+      routes: [
+        {
+          match: (u) => u.includes("chat.postMessage"),
+          responses: [{ body: { ok: false, error: "err" } }],
+        },
+      ],
+    });
+    seedSummarized(ctx.fake, { pageId: "p1", title: "A", summary: "a", author: "x" });
+    await runDailyDigest(ctx.deps);
+    expect(postBodies(ctx.fetchMock).length).toBe(3); // 初回 + 2 リトライ
+    expect(ctx.fake.pageStates.get("p1")?.status).toBe("summarized");
+    expect(ctx.fake.appState.get("last_digest_time")).toBeUndefined();
+  });
+});
+
+describe("日次通知の更新期間", () => {
+  it("古い更新を除外し、期間開始を含め、締切後の更新は保持する", async () => {
+    const ctx = buildCtx({ routes: [SLACK_OK] });
+    for (const [pageId, edited] of [
+      ["old", "2026-06-04T23:59:59.999Z"],
+      ["start", "2026-06-05T00:00:00.000Z"],
+      ["next", "2026-06-06T00:00:00.000Z"],
+    ]) {
+      const row = seedSummarized(ctx.fake, {
+        pageId,
+        title: pageId,
+        summary: "要約",
+        author: "更新者",
+      });
+      row.latest_last_edited_time = edited;
+    }
+    await runDailyDigest(ctx.deps);
+    const rendered = JSON.stringify(postBodies(ctx.fetchMock));
+    expect(rendered).toContain("start");
+    expect(rendered).not.toContain("old");
+    expect(rendered).not.toContain("next");
+    expect(ctx.fake.pageStates.get("old")?.status).toBe("skipped");
+    expect(ctx.fake.pageStates.get("next")?.status).toBe("summarized");
   });
 });

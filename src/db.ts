@@ -20,6 +20,11 @@ export interface PageStateRow {
   lock_until: string | null;
   last_summarized_at: string | null;
   last_summary: string | null;
+  // ダイジェスト表示用に、要約時のページメタを保持する (計画: 日次ダイジェスト)。
+  last_title: string | null;
+  last_url: string | null;
+  last_category: string | null;
+  last_author: string | null;
   slack_ts: string | null;
   retry_count: number;
   error_message: string | null;
@@ -79,6 +84,19 @@ export class Db {
          LIMIT ?`,
       )
       .bind(now, now, limit)
+      .all<PageStateRow>();
+    return result.results ?? [];
+  }
+
+  /**
+   * ダイジェスト対象 = 要約済み・未配信のページを古い順に返す (日次ダイジェスト)。
+   * 件数は 1 日分なので全件返す (LIMIT なし)。
+   */
+  async getSummarizedPages(): Promise<PageStateRow[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT * FROM page_state WHERE status = 'summarized' ORDER BY last_summarized_at ASC`,
+      )
       .all<PageStateRow>();
     return result.results ?? [];
   }
@@ -161,24 +179,30 @@ export class Db {
   }
 
   /**
-   * 要約完了時の page_state 確定。
+   * 要約完了時の page_state 確定 (要約フェーズ)。Slack 投稿はダイジェスト側で行うため、
+   * ここでは status を 'summarized' (要約済み・未配信) にし、ダイジェスト表示用メタを保存する。
    * - latest_last_edited_time に「今要約した版の last_edited_time」を記録 (次回の重複判定基準)。
    * - 処理中に新しい Webhook が来て debounce_until が変わっていた場合 (expectedDebounceUntil と不一致)、
-   *   completed にせず pending のまま残す → 次の Cron で新しい編集を要約する (編集の取りこぼし防止)。
+   *   summarized にせず pending のまま残す → 次の Cron で新しい編集を要約する (編集の取りこぼし防止)。
    */
-  async markPageCompleted(params: {
+  async markPageSummarized(params: {
     pageId: string;
     lastEditedTime: string;
     summary: string;
+    title: string;
+    url: string;
+    category: string;
+    author: string;
     expectedDebounceUntil: string;
     now: string;
   }): Promise<void> {
     await this.db
       .prepare(
         `UPDATE page_state
-           SET status = CASE WHEN debounce_until = ? THEN 'completed' ELSE 'pending' END,
+           SET status = CASE WHEN debounce_until = ? THEN 'summarized' ELSE 'pending' END,
                latest_last_edited_time = ?,
-               last_summary = ?, last_summarized_at = ?,
+               last_summary = ?, last_title = ?, last_url = ?, last_category = ?, last_author = ?,
+               last_summarized_at = ?,
                lock_until = NULL, error_message = NULL, updated_at = ?
          WHERE page_id = ?`,
       )
@@ -186,10 +210,34 @@ export class Db {
         params.expectedDebounceUntil,
         params.lastEditedTime,
         params.summary,
+        params.title,
+        params.url,
+        params.category,
+        params.author,
         params.now,
         params.now,
         params.pageId,
       )
+      .run();
+  }
+
+  /** グローバル状態 (app_state) の読み出し。未設定なら null。 */
+  async getAppState(key: string): Promise<string | null> {
+    const row = await this.db
+      .prepare("SELECT value FROM app_state WHERE key = ?")
+      .bind(key)
+      .first<{ value: string | null }>();
+    return row?.value ?? null;
+  }
+
+  /** グローバル状態 (app_state) の upsert。 */
+  async setAppState(key: string, value: string, now: string): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .bind(key, value, now)
       .run();
   }
 

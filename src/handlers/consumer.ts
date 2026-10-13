@@ -1,26 +1,30 @@
 /**
- * 要約処理 (Cron 駆動・無料構成 / spec §7 を Cron+D1 へ移植)。
+ * 要約処理 & 日次ダイジェスト (Cron 駆動・無料構成)。
  *
- * Cron Trigger が定期実行され、`Db.getDuePages` で「debounce_until を過ぎた pending ページ」を
- * 拾い、各ページに対して本関数を呼ぶ。Queue は使わず、遅延・再試行は D1 で表現する。
+ * 2 フェーズ構成:
+ *   [要約フェーズ] `processDuePages` — 15 分間隔の Cron。`Db.getDuePages` で due な pending を拾い、
+ *     ページごとに要約を生成して D1 に保存する (status=summarized)。Slack 投稿はしない。
+ *   [ダイジェストフェーズ] `runDailyDigest` — 9:00 JST の Cron。summarized を集約し、
+ *     1 通 (上限超過時は複数) の Slack メッセージにまとめて投稿する。
  *
- * 1 ページの処理:
+ * 1 ページの要約処理:
  *   - processing lock を取得 (取れなければ別実行が処理中 → 今回はスキップ、次 tick で再試行)
- *   - ページ再取得 → 現在の last_edited_time が D1 と異なれば newer_edit としてスキップ
+ *   - ページ再取得 → 現在の last_edited_time が D1 と同じなら no_change スキップ
  *   - 本文取得 → 空なら empty_body スキップ
- *   - Gemini 要約 (permanent エラーは Slack 投稿せず failed)
- *   - Slack 投稿 (チャンネル単位で冪等 / 一部失敗は retry)
- *   - 完了で completed
+ *   - Gemini 要約 (permanent エラーは failed)
+ *   - 要約結果とメタ (タイトル/URL/カテゴリ/最終更新者) を D1 に保存 (status=summarized)
  *
- * retry 方針 (D1 retry_count ベース):
- *   notion retryable / gemini transient / slack 未完了 などの一時失敗は
- *   retry_count < maxRetries なら bumpRetry で pending に戻し (次 tick で再試行)、
- *   上限到達なら failed として記録する。
+ * retry 方針:
+ *   - 要約フェーズ: notion retryable / gemini transient などの一時失敗は
+ *     retry_count < maxRetries なら bumpRetry で pending に戻し (次 tick で再試行)、
+ *     上限到達なら failed として記録する (D1 retry_count ベース)。
+ *   - ダイジェストフェーズ: Slack 投稿失敗はパート単位で実行内リトライ (digestMaxRetries 回)。
+ *     全滅したパートは summarized のまま残し、翌日のダイジェストで再送する。
  */
 import type { Db, PageStateRow } from "../db.js";
 import { type GeminiClient, GeminiError, SUMMARY_ERROR_PREFIX } from "../services/gemini.js";
 import { NotionApiError, type NotionClient } from "../services/notion.js";
-import { type SlackClient, buildSummaryMessage } from "../services/slack.js";
+import { type SlackClient, type SlackMessage, buildDigestMessages } from "../services/slack.js";
 import type { AppConfig } from "../types.js";
 import type { Logger } from "../utils/logger.js";
 
@@ -31,6 +35,8 @@ export interface ProcessorDeps {
   gemini: GeminiClient;
   slack: SlackClient;
   now: () => Date;
+  /** リトライ間の待機 (テストでは no-op を注入)。 */
+  sleep: (ms: number) => Promise<void>;
   logger: Logger;
   maxRetries: number;
   lockTtlSeconds: number;
@@ -39,19 +45,104 @@ export interface ProcessorDeps {
 /** 一時失敗 (retry 対象) を表す内部エラー。 */
 class RetryableError extends Error {}
 
-/** Cron 1 回分: due なページを取得し、それぞれ処理する。 */
+/** 要約フェーズ (Cron 1 回分): due なページを取得し、それぞれ要約して D1 に貯める。 */
 export async function processDuePages(deps: ProcessorDeps): Promise<void> {
   const nowIso = deps.now().toISOString();
   const pages = await deps.db.getDuePages(nowIso, deps.config.cronMaxPages);
-  deps.logger.info("cron tick", { due_pages: pages.length });
+  deps.logger.info("summarize tick", { due_pages: pages.length });
   for (const page of pages) {
     await processDuePage(page, deps);
   }
 }
 
+/**
+ * ダイジェストフェーズ (9:00 JST の Cron 1 回分)。
+ * summarized なページを集約し、1 通 (上限超過時は複数) の Slack メッセージにまとめて投稿する。
+ * 投稿成功したパート単位で completed にし、全パート成功で last_digest_time を更新する。
+ * 失敗したパートは summarized のまま残し、翌日のダイジェストで再送する (二重投稿を避ける)。
+ */
+export async function runDailyDigest(deps: ProcessorDeps): Promise<void> {
+  const nowIso = deps.now().toISOString();
+  // UTC 0時 = 日本時間9時。Cronの実行遅延に左右されない日次の対象期間。
+  const cutoff = new Date(nowIso);
+  cutoff.setUTCHours(0, 0, 0, 0);
+  const start = cutoff.getTime() - 24 * 60 * 60 * 1000;
+  const pages: PageStateRow[] = [];
+  for (const page of await deps.db.getSummarizedPages()) {
+    const editedAt = Date.parse(page.latest_last_edited_time);
+    if (!Number.isFinite(editedAt) || editedAt < start) {
+      await deps.db.markPageStatus({ pageId: page.page_id, status: "skipped", now: nowIso });
+      deps.logger.info("digest: stale update excluded", { page_id: page.page_id });
+    } else if (editedAt < cutoff.getTime()) {
+      pages.push(page);
+    }
+  }
+  if (pages.length === 0) {
+    await deps.db.setAppState("last_digest_time", nowIso, nowIso);
+    deps.logger.info("digest: nothing to post");
+    return;
+  }
+
+  const channels = deps.config.slackChannelIds;
+  if (channels.length === 0) {
+    // 設定不備。summarized のまま残し、設定後の次回で投稿する。
+    deps.logger.error("no slack channel configured for digest");
+    return;
+  }
+
+  // 上限超過時は複数メッセージへ自動分割。各 part は載せた pageIds を持つ。
+  const parts = buildDigestMessages({
+    count: pages.length,
+    itemMaxChars: deps.config.digestItemMaxChars,
+    items: pages.map((p) => ({
+      pageId: p.page_id,
+      title: p.last_title ?? "(無題)",
+      summaryMarkdown: p.last_summary ?? "",
+      url: p.last_url ?? "",
+      category: p.last_category ?? "未分類",
+      author: p.last_author ?? "不明",
+    })),
+  });
+
+  let allDelivered = true;
+  for (const part of parts) {
+    const ok = await postPartWithRetry(deps, channels, part.message, deps.config.digestMaxRetries);
+    if (!ok) {
+      // 実行内リトライも全滅 → 残りは翌日に回す (既配信パートは completed 済みで再送されない)。
+      deps.logger.warn("digest part failed after retries", { page_ids: part.pageIds });
+      allDelivered = false;
+      break;
+    }
+    for (const id of part.pageIds) {
+      await deps.db.markPageStatus({ pageId: id, status: "completed", now: nowIso });
+    }
+  }
+
+  if (allDelivered) await deps.db.setAppState("last_digest_time", nowIso, nowIso);
+  deps.logger.info("digest posted", { parts: parts.length, all_delivered: allDelivered });
+}
+
+/** Slack 投稿を retries 回まで再試行する (全チャンネル ok で成功)。試行間は短い backoff。 */
+async function postPartWithRetry(
+  deps: ProcessorDeps,
+  channels: string[],
+  message: SlackMessage,
+  retries: number,
+): Promise<boolean> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const results = await deps.slack.postToChannels(channels, message);
+    if (results.length > 0 && results.every((r) => r.ok)) return true;
+    if (attempt < retries) {
+      deps.logger.warn("digest post retry", { attempt: attempt + 1 });
+      await deps.sleep(500 * (attempt + 1)); // 0.5s, 1.0s ...
+    }
+  }
+  return false;
+}
+
 /** 1 ページを要約処理する。lock 取得から完了/スキップ/失敗までを担う。 */
 export async function processDuePage(state: PageStateRow, deps: ProcessorDeps): Promise<void> {
-  const { db, notion, gemini, slack, config, logger } = deps;
+  const { db, notion, gemini, config, logger } = deps;
   const pageId = state.page_id;
   const nowDate = deps.now();
   const nowIso = nowDate.toISOString();
@@ -134,47 +225,22 @@ export async function processDuePage(state: PageStateRow, deps: ProcessorDeps): 
       return;
     }
 
-    // Slack 投稿 (チャンネル単位の冪等化, 計画 §4-C)。
-    const channels = config.slackChannelIds;
-    if (channels.length === 0) {
-      logger.error("no slack channel configured", { page_id: pageId });
-      await failPage(deps, jobId, pageId, "no_slack_channel", nowIso);
-      lockAcquired = false;
-      return;
-    }
+    // 最終更新者名を解決 (last_edited_by は partial user=id のみ → Users API で名前を引く)。
+    // 失敗しても要約は止めず「不明」にフォールバックする。
+    const author = info.lastEditedById
+      ? (await safe(() => notion.getUserName(info.lastEditedById as string))) || "不明"
+      : "不明";
 
-    const already = await db.getPostedChannels(pageId);
-    const targets = channels.filter((c) => !already[c]);
-    const message = buildSummaryMessage({
-      title: info.title,
-      category,
-      updatedAt: formatJst(info.lastEditedTime),
-      summaryMarkdown: summary,
-      url: info.url,
-    });
-    const results = targets.length > 0 ? await slack.postToChannels(targets, message) : [];
-    const posted: Record<string, string> = {};
-    for (const r of results) {
-      if (r.ok && r.ts) posted[r.channel] = r.ts;
-      else if (!r.ok) logger.warn("slack post failed", { page_id: pageId, error: r.error });
-    }
-    if (Object.keys(posted).length > 0) {
-      await db.addPostedChannels({ pageId, posted, now: nowIso });
-    }
-
-    const successful = { ...already, ...posted };
-    const allPosted = channels.every((c) => successful[c]);
-    if (!allPosted) {
-      // 未投稿チャンネルが残る → retry (次回は未投稿分のみ送る)。lock は catch で解放。
-      throw new RetryableError("slack post incomplete");
-    }
-
-    // 完了確定。処理中に新しい Webhook で debounce_until が変わっていれば pending のまま残し、
-    // 次の Cron で新しい編集を要約する (markPageCompleted 内の CASE で判定)。
-    await db.markPageCompleted({
+    // 要約結果とダイジェスト表示用メタを D1 に保存 (status=summarized)。Slack 投稿はダイジェスト側。
+    // 処理中に新しい Webhook で debounce_until が変わっていれば pending のまま残す (取りこぼし防止)。
+    await db.markPageSummarized({
       pageId,
       lastEditedTime: info.lastEditedTime,
       summary,
+      title: info.title,
+      url: info.url,
+      category,
+      author,
       expectedDebounceUntil: fresh.debounce_until,
       now: nowIso,
     });
@@ -187,7 +253,7 @@ export async function processDuePage(state: PageStateRow, deps: ProcessorDeps): 
         now: nowIso,
       });
     }
-    logger.info("summary completed", { job_id: jobId, page_id: pageId });
+    logger.info("summary stored", { job_id: jobId, page_id: pageId });
   } catch (error) {
     await handleFailure(error, deps, jobId, state, nowIso, lockAcquired);
   }
