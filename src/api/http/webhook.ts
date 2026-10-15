@@ -12,21 +12,27 @@
  *   4. それ以外は署名必須。NOTION_WEBHOOK_TOKEN 未設定なら fail-closed で 500。
  *   5. 対象イベント/ページ判定 → D1 に debounce 状態を記録 (pending) + 履歴。
  */
-import type { Db } from "../db.js";
-import type { AppConfig } from "../types.js";
-import { verifyNotionSignature } from "../utils/crypto.js";
-import type { Logger } from "../utils/logger.js";
+import type { UpdateOptions } from "../../modules/summary/application/options.js";
+import type { Logger } from "../../modules/summary/application/ports/logger.js";
+import {
+  type UpdateDeps,
+  recordPageUpdate,
+} from "../../modules/summary/application/use-cases/record-page-update.js";
+import { messageOf } from "../../modules/summary/application/use-cases/support.js";
+import { verifyNotionSignature } from "./signature.js";
 
-export interface WebhookDeps {
-  config: AppConfig;
-  db: Db;
-  now: () => Date;
-  uuid: () => string;
+interface WebhookConfig extends UpdateOptions {
+  notionWebhookToken?: string;
+  notionEventTypes: string[];
+}
+
+export interface WebhookDeps extends UpdateDeps {
+  config: WebhookConfig;
   logger: Logger;
 }
 
 export async function handleWebhook(request: Request, deps: WebhookDeps): Promise<Response> {
-  const { config, db, logger } = deps;
+  const { config, logger } = deps;
 
   // 1. raw body を 1 回だけ読む。
   const raw = await request.text();
@@ -77,37 +83,9 @@ export async function handleWebhook(request: Request, deps: WebhookDeps): Promis
     return json({ ok: true, skipped: "no_page_id" }, 200);
   }
 
-  const nowDate = deps.now();
-  const nowIso = nowDate.toISOString();
-  const jobId = deps.uuid();
-
-  // D1 更新 (debounce 状態を pending で記録 + summary_jobs 履歴)。
-  // 実処理 (ページ取得・DBフィルタ・要約) は Cron。
+  let jobId: string;
   try {
-    // 要約実行時刻 = max(最後の編集 + デバウンス, 前回要約 + クールダウン)。
-    //  - デバウンス: 編集が止まってから summaryDelaySeconds 後に要約。
-    //  - クールダウン: 前回要約から summaryMinIntervalSeconds は次の要約を出さない。
-    const existing = await db.getPageState(pageId);
-    let debounceMs = nowDate.getTime() + config.summaryDelaySeconds * 1000;
-    if (existing?.last_summarized_at) {
-      const cooldownEnd =
-        Date.parse(existing.last_summarized_at) + config.summaryMinIntervalSeconds * 1000;
-      if (Number.isFinite(cooldownEnd) && cooldownEnd > debounceMs) {
-        debounceMs = cooldownEnd;
-      }
-    }
-    const debounceUntil = new Date(debounceMs).toISOString();
-
-    await db.upsertPageState({ pageId, debounceUntil, now: nowIso });
-    await db.insertJob({
-      id: jobId,
-      pageId,
-      eventType,
-      payloadLastEditedTime: null,
-      status: "queued",
-      queuedAt: nowIso,
-      now: nowIso,
-    });
+    jobId = await recordPageUpdate({ pageId, eventType }, deps);
   } catch (error) {
     logger.error("db update failed", { page_id: pageId, error: messageOf(error) });
     return json({ error: "db_error" }, 500);
@@ -126,8 +104,4 @@ function json(body: unknown, status: number): Response {
 
 function asObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
