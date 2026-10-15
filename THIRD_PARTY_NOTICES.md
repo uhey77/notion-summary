@@ -9,7 +9,7 @@
 - 著作権表示：Copyright (c) 2026 nanaism
 - 使用箇所：[比較用のSkill](docs/prompts/yomiyasu-tech/SKILL.md)、[技術文書向け指針](docs/prompts/yomiyasu-tech/references/domains/tech.md)、[プロンプト全文](docs/ai-daily-yomiyasu-full-prompt.md)
 - 変更内容：SKILL.mdの分野選択をtechに固定し、他分野への言及と同梱しない資料への参照を削除・置換。tech.mdは原文を保持。要約の分量・テーマ統合・出力形式の指示は、このプロジェクト側で追加。
-- 適用範囲：本番・比較用プロンプトに使用。本番埋め込みは[src/services/yomiyasu.ts](src/services/yomiyasu.ts)。
+- 適用範囲：本番・比較用プロンプトに使用。本番埋め込みは[src/modules/summary/infrastructure/gemini/yomiyasu.ts](src/modules/summary/infrastructure/gemini/yomiyasu.ts)。
 
 使用した版のLICENSEに従い、以下に原文を収録する。
 
