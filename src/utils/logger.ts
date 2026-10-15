@@ -5,7 +5,7 @@
  * 出さない:   トークン・APIキー・Notion 本文全文・Gemini プロンプト全文。
  * 秘密情報を渡さない責務は呼び出し側にあるが、本モジュールは余計な値を勝手に展開しない。
  */
-import type { LogLevel, Logger } from "../../application/ports/logger.js";
+import type { LogLevel } from "../types.js";
 
 const LEVEL_ORDER: Record<LogLevel, number> = {
   DEBUG: 10,
@@ -13,6 +13,13 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
   WARN: 30,
   ERROR: 40,
 };
+
+export interface Logger {
+  debug(message: string, fields?: Record<string, unknown>): void;
+  info(message: string, fields?: Record<string, unknown>): void;
+  warn(message: string, fields?: Record<string, unknown>): void;
+  error(message: string, fields?: Record<string, unknown>): void;
+}
 
 export function createLogger(level: LogLevel): Logger {
   const threshold = LEVEL_ORDER[level] ?? LEVEL_ORDER.INFO;

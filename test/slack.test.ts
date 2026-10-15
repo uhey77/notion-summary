@@ -6,7 +6,7 @@ import {
   markdownToMrkdwn,
   markdownToPlainText,
   splitForSection,
-} from "../src/modules/summary/infrastructure/slack/client.js";
+} from "../src/services/slack.js";
 import { createFetchMock } from "./helpers/fetchMock.js";
 
 describe("markdownToMrkdwn", () => {

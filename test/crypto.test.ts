@@ -3,7 +3,7 @@ import {
   computeHmacSha256Hex,
   timingSafeEqual,
   verifyNotionSignature,
-} from "../src/api/http/signature.js";
+} from "../src/utils/crypto.js";
 
 const TOKEN = "secret_verification_token";
 const BODY = '{"type":"page.content_updated","entity":{"type":"page","id":"abc"}}';

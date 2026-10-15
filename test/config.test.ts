@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULTS, loadConfig, parseCsv } from "../src/config/config.js";
-import type { Env } from "../src/config/types.js";
+import { DEFAULTS, loadConfig, parseCsv } from "../src/config.js";
+import type { Env } from "../src/types.js";
 
 /** D1 は config では使わないので最小スタブで足りる。 */
 function makeEnv(overrides: Partial<Env> = {}): Env {

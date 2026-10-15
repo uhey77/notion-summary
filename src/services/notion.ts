@@ -1,5 +1,3 @@
-import { ExternalServiceError, type PageSource } from "../../application/ports/services.js";
-import type { PageContent, PageInfo } from "../../domain/summary.js";
 /**
  * Notion REST API クライアント (spec §10)。
  *
@@ -12,18 +10,19 @@ import type { PageContent, PageInfo } from "../../domain/summary.js";
  *   - 4xx (404 削除済み / 403 権限不足 / 400 不正) は retryable=false。
  * fetch は注入可能 (テストでモックする)。
  */
-import { type NotionBlock, blocksToMarkdown } from "./markdown.js";
+import { type NotionBlock, blocksToMarkdown } from "../markdown.js";
+import type { NotionPageContent, NotionPageInfo } from "../types.js";
 
 const NOTION_API_BASE = "https://api.notion.com";
 const TRUNCATION_NOTE = "[本文が長いため、一部のブロックは省略されています]";
 
-export class NotionApiError extends ExternalServiceError {
+export class NotionApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    retryable: boolean,
+    readonly retryable: boolean,
   ) {
-    super(message, retryable);
+    super(message);
     this.name = "NotionApiError";
   }
 }
@@ -44,7 +43,7 @@ interface FetchContext {
   truncated: boolean;
 }
 
-export class NotionClient implements PageSource {
+export class NotionClient {
   private readonly fetchImpl: typeof fetch;
   /** user id -> name の同一 invocation 内キャッシュ (最終更新者名の重複解決を避ける)。 */
   private readonly userNameCache = new Map<string, string>();
@@ -72,7 +71,7 @@ export class NotionClient implements PageSource {
   }
 
   /** ページ情報を取得し、要約に必要な最小情報へ整形する。 */
-  async getPageInfo(pageId: string): Promise<PageInfo> {
+  async getPageInfo(pageId: string): Promise<NotionPageInfo> {
     const page = await this.request<Record<string, unknown>>(`/v1/pages/${pageId}`);
     return {
       id: typeof page.id === "string" ? page.id : pageId,
@@ -106,7 +105,7 @@ export class NotionClient implements PageSource {
   }
 
   /** ページ本文を取得し Markdown 化する。上限到達時は末尾に省略注記を付ける。 */
-  async getPageContent(pageId: string): Promise<PageContent> {
+  async getPageContent(pageId: string): Promise<NotionPageContent> {
     const ctx: FetchContext = { fetches: 0, blocks: 0, truncated: false };
     const tree = await this.listChildren(pageId, ctx);
     let markdown = blocksToMarkdown(tree);

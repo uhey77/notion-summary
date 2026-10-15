@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { D1SummaryRepository as Db } from "../src/modules/summary/infrastructure/persistence/d1-summary-repository.js";
+import { Db } from "../src/db.js";
 import { FakeD1 } from "./helpers/fakeD1.js";
 
 let fake: FakeD1;
@@ -19,8 +19,8 @@ describe("upsertPageState (軽量)", () => {
     });
     const row = await db.getPageState("p1");
     expect(row?.status).toBe("pending");
-    expect(row?.debounceUntil).toBe("2026-06-06T10:10:00.000Z");
-    expect(row?.lastEditedTime).toBe(""); // 新規は空
+    expect(row?.debounce_until).toBe("2026-06-06T10:10:00.000Z");
+    expect(row?.latest_last_edited_time).toBe(""); // 新規は空
   });
 
   it("既存行は debounce/status のみ更新し latest_last_edited_time は保持する", async () => {
@@ -41,8 +41,8 @@ describe("upsertPageState (軽量)", () => {
     await db.upsertPageState({ pageId: "p1", debounceUntil: "d2", now: "n2" });
     const row = await db.getPageState("p1");
     expect(row?.status).toBe("pending");
-    expect(row?.debounceUntil).toBe("d2");
-    expect(row?.lastEditedTime).toBe("2026-06-06T09:00:00.000Z"); // 保持
+    expect(row?.debounce_until).toBe("d2");
+    expect(row?.latest_last_edited_time).toBe("2026-06-06T09:00:00.000Z"); // 保持
   });
 });
 
@@ -121,7 +121,7 @@ describe("getDuePages (Cron ポーリング)", () => {
     });
 
     const due = await db.getDuePages("2026-06-06T10:10:00.000Z", 10);
-    expect(due.map((p) => p.pageId)).toEqual(["due2", "due1"]); // debounce 昇順
+    expect(due.map((p) => p.page_id)).toEqual(["due2", "due1"]); // debounce 昇順
   });
 
   it("ロック中のページは除外する", async () => {
@@ -136,7 +136,7 @@ describe("getDuePages (Cron ポーリング)", () => {
       lockUntil: "2026-06-06T10:11:00.000Z",
     });
     const due = await db.getDuePages("2026-06-06T10:10:00.000Z", 10);
-    expect(due.find((p) => p.pageId === "locked")).toBeUndefined();
+    expect(due.find((p) => p.page_id === "locked")).toBeUndefined();
   });
 
   it("limit で件数を絞る", async () => {
@@ -162,9 +162,9 @@ describe("bumpRetry", () => {
     await db.bumpRetry("p1", "2026-01-01T00:01:00.000Z", "gemini transient");
     const row = await db.getPageState("p1");
     expect(row?.status).toBe("pending");
-    expect(row?.retryCount).toBe(1);
-    expect(fake.pageStates.get("p1")?.lock_until).toBeNull();
-    expect(fake.pageStates.get("p1")?.error_message).toBe("gemini transient");
+    expect(row?.retry_count).toBe(1);
+    expect(row?.lock_until).toBeNull();
+    expect(row?.error_message).toBe("gemini transient");
   });
 });
 
@@ -212,13 +212,13 @@ describe("markPageSummarized", () => {
     });
     const row = await db.getPageState("p1");
     expect(row?.status).toBe("summarized");
-    expect(row?.summary).toBe("要約本文");
-    expect(row?.title).toBe("記事タイトル");
-    expect(row?.url).toBe("https://notion.so/p1");
-    expect(row?.category).toBe("研究");
-    expect(row?.author).toBe("田中");
-    expect(row?.lastEditedTime).toBe("2026-06-06T10:00:00.000Z");
-    expect(fake.pageStates.get("p1")?.lock_until).toBeNull();
+    expect(row?.last_summary).toBe("要約本文");
+    expect(row?.last_title).toBe("記事タイトル");
+    expect(row?.last_url).toBe("https://notion.so/p1");
+    expect(row?.last_category).toBe("研究");
+    expect(row?.last_author).toBe("田中");
+    expect(row?.latest_last_edited_time).toBe("2026-06-06T10:00:00.000Z");
+    expect(row?.lock_until).toBeNull();
   });
 
   it("処理中に debounce_until が変わっていたら pending のまま残す (取りこぼし防止)", async () => {
@@ -237,7 +237,7 @@ describe("markPageSummarized", () => {
     });
     const row = await db.getPageState("p1");
     expect(row?.status).toBe("pending"); // summarized にしない
-    expect(row?.lastEditedTime).toBe("2026-06-06T10:00:00.000Z"); // 版は記録
+    expect(row?.latest_last_edited_time).toBe("2026-06-06T10:00:00.000Z"); // 版は記録
   });
 });
 
@@ -270,7 +270,7 @@ describe("getSummarizedPages", () => {
       now: "2026-06-06T07:00:00.000Z",
     });
     const rows = await db.getSummarizedPages();
-    expect(rows.map((r) => r.pageId)).toEqual(["b", "a"]); // 昇順
+    expect(rows.map((r) => r.page_id)).toEqual(["b", "a"]); // 昇順
   });
 });
 
@@ -298,7 +298,7 @@ describe("markPageStatus", () => {
     });
     const row = await db.getPageState("p1");
     expect(row?.status).toBe("failed");
-    expect(fake.pageStates.get("p1")?.error_message).toBe("gemini error");
-    expect(fake.pageStates.get("p1")?.lock_until).toBeNull();
+    expect(row?.error_message).toBe("gemini error");
+    expect(row?.lock_until).toBeNull();
   });
 });

@@ -2,8 +2,6 @@
 
 作成日: 2026-06-29
 
-> この仕様書は旧Queues構成の設計記録を含む。現在のCron＋D1構成とディレクトリは [README.md](../README.md#ディレクトリ構成) を参照。
-
 ## 1. 概要
 
 `notion-summarizer` は、Notion ページの更新を Webhook で受け取り、一定時間編集が止まった後にページ本文を Gemini で要約し、Slack の指定チャンネルへ投稿する Bot である。
@@ -97,13 +95,13 @@ Cloud Run / Cloud Tasks / Secret Manager による構成は廃止し、Cloudflar
 | コンポーネント | 実装例 | 役割 |
 |---|---|---|
 | Worker HTTP Handler | `src/index.ts` | Webhook 受信、ヘルスチェック、管理用エンドポイントを提供する |
-| Cron Handler | `src/api/cron/handler.ts` | Cronから要約・日次配信のユースケースを呼び出す |
-| Notion クライアント | `src/modules/summary/infrastructure/notion/client.ts` | ページ情報、DB 情報、本文ブロックを取得し、本文を Markdown に変換する |
-| Gemini クライアント | `src/modules/summary/infrastructure/gemini/client.ts` | ページ本文を指定プロンプトで要約する |
-| Slack 通知 | `src/modules/summary/infrastructure/slack/client.ts` | 要約結果を Slack Block Kit 形式で投稿する |
-| D1 リポジトリ | `src/modules/summary/infrastructure/persistence/d1-summary-repository.ts` | デバウンス状態、ジョブ履歴、実行結果を保存する |
-| Markdown 変換 | `src/modules/summary/infrastructure/notion/markdown.ts` | Notion ブロックを要約用 Markdown に変換する |
-| 設定 | `src/config/config.ts` | `env` bindings / vars / secrets から設定値を読み込む |
+| Queue Consumer | `src/queue.ts` | Queues から要約ジョブを受け取り、実行する |
+| Notion クライアント | `src/notion.ts` | ページ情報、DB 情報、本文ブロックを取得し、本文を Markdown に変換する |
+| Gemini クライアント | `src/gemini.ts` | ページ本文を指定プロンプトで要約する |
+| Slack 通知 | `src/slack.ts` | 要約結果を Slack Block Kit 形式で投稿する |
+| D1 リポジトリ | `src/db.ts` | デバウンス状態、ジョブ履歴、実行結果を保存する |
+| Markdown 変換 | `src/markdown.ts` | Notion ブロックを要約用 Markdown に変換する |
+| 設定 | `src/config.ts` | `env` bindings / vars / secrets から設定値を読み込む |
 
 ---
 

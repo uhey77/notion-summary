@@ -2,9 +2,7 @@
  * env bindings / vars / secrets から型付き AppConfig を組み立てる。
  * vars にはデフォルトを適用し、secrets はそのまま読む (利用箇所でガード)。
  */
-import type { LogLevel } from "../modules/summary/application/ports/logger.js";
-import type { SummaryLength, SummaryStyle } from "../modules/summary/domain/summary.js";
-import type { AppConfig, Env } from "./types.js";
+import type { AppConfig, Env, LogLevel, SummaryLength, SummaryStyle } from "./types.js";
 
 const DEFAULTS = {
   notionVersion: "2022-06-28",

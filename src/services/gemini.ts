@@ -8,8 +8,7 @@
  *
  * Queue Consumer からのみ呼ぶ。Webhook 受付時には呼ばない。
  */
-import type { SummarizeInput, SummaryLength, SummaryStyle } from "../../domain/summary.js";
-export type { SummarizeInput } from "../../domain/summary.js";
+import type { SummaryLength, SummaryStyle } from "../types.js";
 import { YOMIYASU_GUIDANCE } from "./yomiyasu.js";
 
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com";
@@ -37,6 +36,13 @@ export interface GeminiClientOptions {
   length: SummaryLength;
   style: SummaryStyle;
   fetchImpl?: typeof fetch;
+}
+
+export interface SummarizeInput {
+  title: string;
+  /** 親 DB タイトルなどの分類情報。未指定なら「なし」として扱う。 */
+  category?: string;
+  markdown: string;
 }
 
 export class GeminiClient {

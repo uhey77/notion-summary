@@ -1,30 +1,18 @@
 import { describe, expect, it } from "vitest";
-import type { AppConfig } from "../src/config/types.js";
+import { Db, type PageStateRow } from "../src/db.js";
 import {
-  type DigestDeps,
-  runDailyDigest,
-} from "../src/modules/summary/application/use-cases/publish-daily-digest.js";
-import {
-  type SummaryDeps,
+  type ProcessorDeps,
+  formatJst,
   processDuePage,
   processDuePages,
-} from "../src/modules/summary/application/use-cases/summarize-pages.js";
-import { GeminiSummarizer } from "../src/modules/summary/infrastructure/gemini/summarizer.js";
-import {
-  D1SummaryRepository as Db,
-  type PageStateRow,
-} from "../src/modules/summary/infrastructure/persistence/d1-summary-repository.js";
-import { toPageSummary } from "../src/modules/summary/infrastructure/persistence/d1-summary-repository.js";
-import { SlackDigestPublisher } from "../src/modules/summary/infrastructure/slack/digest-publisher.js";
-
-import { GeminiClient } from "../src/modules/summary/infrastructure/gemini/client.js";
-import { createLogger } from "../src/modules/summary/infrastructure/logging/logger.js";
-import { NotionClient } from "../src/modules/summary/infrastructure/notion/client.js";
-import { SlackClient } from "../src/modules/summary/infrastructure/slack/client.js";
+  runDailyDigest,
+} from "../src/handlers/consumer.js";
+import { GeminiClient } from "../src/services/gemini.js";
+import { NotionClient } from "../src/services/notion.js";
+import { SlackClient } from "../src/services/slack.js";
+import { createLogger } from "../src/utils/logger.js";
 import { FakeD1 } from "./helpers/fakeD1.js";
 import { type Route, createFetchMock } from "./helpers/fetchMock.js";
-
-type ProcessorDeps = SummaryDeps & DigestDeps & { config: AppConfig };
 
 const PAGE_ID = "page-1";
 const LET = "2026-06-06T09:59:00.000Z"; // Notion が返す現在の last_edited_time
@@ -117,8 +105,8 @@ function buildCtx(options: {
       digestMaxRetries: options.digestMaxRetries ?? 2,
       slackChannelIds: options.channels ?? ["C1"],
     },
-    repository: db,
-    source: new NotionClient({
+    db,
+    notion: new NotionClient({
       token: "n",
       notionVersion: "2022-06-28",
       pageSize: 100,
@@ -127,17 +115,15 @@ function buildCtx(options: {
       maxMarkdownChars: 30000,
       fetchImpl,
     }),
-    summarizer: new GeminiSummarizer(
-      new GeminiClient({
-        apiKey: "k",
-        model: "gemini-3.1-flash-lite",
-        defaultModel: "gemini-3.1-flash-lite",
-        length: "medium",
-        style: "bullet",
-        fetchImpl,
-      }),
-    ),
-    publisher: new SlackDigestPublisher(new SlackClient("t", fetchImpl)),
+    gemini: new GeminiClient({
+      apiKey: "k",
+      model: "gemini-3.1-flash-lite",
+      defaultModel: "gemini-3.1-flash-lite",
+      length: "medium",
+      style: "bullet",
+      fetchImpl,
+    }),
+    slack: new SlackClient("t", fetchImpl),
     now: () => options.now ?? NOW,
     sleep: async () => {}, // テストでは待たない
     logger: createLogger("ERROR"),
@@ -224,6 +210,12 @@ function postBodies(fetchMock: typeof fetch): Array<{ blocks: unknown[]; text: s
     .map(([, init]) => JSON.parse(init.body as string));
 }
 
+describe("formatJst", () => {
+  it("UTC を JST へ変換する", () => {
+    expect(formatJst("2026-06-06T09:59:00.000Z")).toBe("2026-06-06 18:59 JST");
+  });
+});
+
 describe("要約フェーズ (processDuePages tick)", () => {
   it("due なページだけ要約して summarized にする", async () => {
     const ctx = buildCtx({ routes: SUMMARIZE_ROUTES });
@@ -239,7 +231,7 @@ describe("lock 競合", () => {
   it("ロック取得失敗なら何もしない", async () => {
     const ctx = buildCtx({ routes: SUMMARIZE_ROUTES });
     const state = seedState(ctx.fake, { lockUntil: "2026-06-06T10:12:00.000Z" });
-    await processDuePage(toPageSummary(state), ctx.deps);
+    await processDuePage(state, ctx.deps);
     expect(ctx.fake.pageStates.get(PAGE_ID)?.status).not.toBe("summarized");
   });
 });
@@ -248,7 +240,7 @@ describe("still_editing スキップ", () => {
   it("ロック後の再読み込みで debounce_until が未来なら処理しない", async () => {
     const ctx = buildCtx({ routes: SUMMARIZE_ROUTES });
     const state = seedState(ctx.fake, { debounceUntil: "2026-06-06T10:20:00.000Z" }); // now より後
-    await processDuePage(toPageSummary(state), ctx.deps);
+    await processDuePage(state, ctx.deps);
     expect(ctx.fake.pageStates.get(PAGE_ID)?.status).not.toBe("summarized");
   });
 });
@@ -257,7 +249,7 @@ describe("no_change スキップ (重複防止)", () => {
   it("前回要約した版と現在の last_edited_time が同じなら completed のまま (要約しない)", async () => {
     const ctx = buildCtx({ routes: SUMMARIZE_ROUTES });
     const state = seedState(ctx.fake, { latest: LET }); // = Notion の現在値
-    await processDuePage(toPageSummary(state), ctx.deps);
+    await processDuePage(state, ctx.deps);
     const row = ctx.fake.pageStates.get(PAGE_ID);
     expect(row?.status).toBe("completed");
     expect(row?.last_summary).toBeNull();
@@ -268,7 +260,7 @@ describe("対象 DB フィルタ (Cron 側)", () => {
   it("親 DB が NOTION_DATABASE_ID と異なれば other_database でスキップ", async () => {
     const ctx = buildCtx({ routes: SUMMARIZE_ROUTES, notionDatabaseId: "db-OTHER" });
     const state = seedState(ctx.fake);
-    await processDuePage(toPageSummary(state), ctx.deps);
+    await processDuePage(state, ctx.deps);
     expect(ctx.fake.pageStates.get(PAGE_ID)?.status).toBe("skipped");
   });
 });
@@ -277,7 +269,7 @@ describe("要約フェーズ 正常系", () => {
   it("要約して summarized にし、メタと作成者を保存する (Slack 投稿しない)", async () => {
     const ctx = buildCtx({ routes: SUMMARIZE_ROUTES });
     const state = seedState(ctx.fake);
-    await processDuePage(toPageSummary(state), ctx.deps);
+    await processDuePage(state, ctx.deps);
     const row = ctx.fake.pageStates.get(PAGE_ID);
     expect(row?.status).toBe("summarized");
     expect(row?.last_summary).toBe("要約結果");
@@ -296,7 +288,7 @@ describe("要約フェーズ 正常系", () => {
     };
     const ctx = buildCtx({ routes: [PAGE_ROUTE, emptyBlocks] });
     const state = seedState(ctx.fake);
-    await processDuePage(toPageSummary(state), ctx.deps);
+    await processDuePage(state, ctx.deps);
     expect(ctx.fake.pageStates.get(PAGE_ID)?.status).toBe("skipped");
   });
 });
@@ -312,7 +304,7 @@ describe("Gemini エラー", () => {
       ],
     });
     const state = seedState(ctx.fake);
-    await processDuePage(toPageSummary(state), ctx.deps);
+    await processDuePage(state, ctx.deps);
     const row = ctx.fake.pageStates.get(PAGE_ID);
     expect(row?.status).toBe("pending");
     expect(row?.retry_count).toBe(1);
@@ -329,7 +321,7 @@ describe("Gemini エラー", () => {
       ],
     });
     const state = seedState(ctx.fake, { retryCount: 2 });
-    await processDuePage(toPageSummary(state), ctx.deps);
+    await processDuePage(state, ctx.deps);
     expect(ctx.fake.pageStates.get(PAGE_ID)?.status).toBe("failed");
   });
 
@@ -346,7 +338,7 @@ describe("Gemini エラー", () => {
       ],
     });
     const state = seedState(ctx.fake);
-    await processDuePage(toPageSummary(state), ctx.deps);
+    await processDuePage(state, ctx.deps);
     const row = ctx.fake.pageStates.get(PAGE_ID);
     expect(row?.status).toBe("failed");
     expect(row?.last_summary).toBeNull();
