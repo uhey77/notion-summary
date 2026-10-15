@@ -23,7 +23,7 @@ describe("buildPrompt", () => {
   it("読者・方針・長さ/形式・本文を含める", () => {
     const p = buildPrompt({ title: "T", markdown: "本文テキスト" }, "short", "paragraph");
     expect(p).toContain("学部生");
-    expect(p).toContain("原文の約10%");
+    expect(p).toContain("原文の10%");
     expect(p).not.toContain("最大200字");
     expect(p).toContain("段落形式");
     expect(p).toContain("タイトル: T");
@@ -48,7 +48,7 @@ describe("buildPrompt", () => {
 
   it("旧medium指定でも割合に基づく目安を使う", () => {
     const p = buildPrompt({ title: "T", markdown: "M" }, "medium", "bullet");
-    expect(p).toContain("原文の約10%");
+    expect(p).toContain("原文の10%");
     expect(p).not.toContain("最大300字");
   });
 
@@ -232,8 +232,20 @@ describe("Vertex AI接続", () => {
 
 it("本文の長さから1割の目安を計算し、条件保持の指示を含める", () => {
   const p = buildPrompt({ title: "T", markdown: "あ".repeat(5000) }, "short", "bullet");
-  expect(p).toContain("本文は5000字なので約500字");
+  expect(p).toContain("本文は5000字。出力は改行・箇条書き記号を含め500字以内");
   expect(p).toContain("相関を因果として書かない");
   expect(p).toContain("候補、例示、任意の作業を区別する");
   expect(p).not.toContain("2〜3項目");
+});
+
+it("技術向けSkillだけを含め、網羅よりテーマと代表例を優先する", () => {
+  const p = buildPrompt({ title: "T", markdown: "あ".repeat(109) }, "short", "bullet");
+  expect(p).toContain("含め10字以内");
+  expect(p).toContain("===== SKILL.md 全文 =====");
+  expect(p).toContain("===== references/domains/tech.md 全文 =====");
+  expect(p).not.toContain("business");
+  expect(p).not.toContain("essay");
+  expect(p).toContain("全記事を紹介する必要はない");
+  expect(p).toContain("各項目は原則2文以内");
+  expect(p).toContain("入力記事の全項目や並び順を復元しない");
 });
