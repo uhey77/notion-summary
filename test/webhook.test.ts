@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "../src/config.js";
-import { Db } from "../src/db.js";
-import { type WebhookDeps, handleWebhook } from "../src/handlers/webhook.js";
-import type { Env } from "../src/types.js";
-import { computeHmacSha256Hex } from "../src/utils/crypto.js";
-import { createLogger } from "../src/utils/logger.js";
+import { computeHmacSha256Hex } from "../src/api/http/signature.js";
+import { type WebhookDeps, handleWebhook } from "../src/api/http/webhook.js";
+import { loadConfig } from "../src/config/config.js";
+import type { Env } from "../src/config/types.js";
+import { createLogger } from "../src/modules/summary/infrastructure/logging/logger.js";
+import { D1SummaryRepository as Db } from "../src/modules/summary/infrastructure/persistence/d1-summary-repository.js";
 import { FakeD1 } from "./helpers/fakeD1.js";
 
 const TOKEN = "whsec";
@@ -27,7 +27,7 @@ function buildCtx(envOverrides: Partial<Env> = {}): Ctx {
   const fake = new FakeD1();
   const deps: WebhookDeps = {
     config,
-    db: new Db(fake.asD1()),
+    repository: new Db(fake.asD1()),
     now: () => NOW,
     uuid: () => "job-fixed",
     logger: createLogger("ERROR"),
@@ -141,7 +141,7 @@ describe("正常系", () => {
 
   it("D1 更新失敗は 500 db_error", async () => {
     const { deps } = buildCtx();
-    deps.db.upsertPageState = async () => {
+    deps.repository.upsertPageState = async () => {
       throw new Error("d1 down");
     };
     const res = await handleWebhook(await makeRequest(VALID_EVENT, { sign: true }), deps);
