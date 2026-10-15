@@ -17,8 +17,8 @@ import type { Logger } from "../../modules/summary/application/ports/logger.js";
 import {
   type UpdateDeps,
   recordPageUpdate,
-} from "../../modules/summary/application/use-cases/record-page-update.js";
-import { messageOf } from "../../modules/summary/application/use-cases/support.js";
+} from "../../modules/summary/application/usecases/record-page-update.js";
+import { messageOf } from "../../modules/summary/application/usecases/support.js";
 import { verifyNotionSignature } from "./signature.js";
 
 interface WebhookConfig extends UpdateOptions {

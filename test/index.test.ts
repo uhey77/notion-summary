@@ -1,16 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/config/types.js";
 
-vi.mock("../src/modules/summary/application/use-cases/summarize-pages.js", () => ({
+vi.mock("../src/modules/summary/application/usecases/summarize-pages.js", () => ({
   processDuePages: vi.fn(),
 }));
-vi.mock("../src/modules/summary/application/use-cases/publish-daily-digest.js", () => ({
+vi.mock("../src/modules/summary/application/usecases/publish-daily-digest.js", () => ({
   runDailyDigest: vi.fn(),
 }));
 import { computeHmacSha256Hex } from "../src/api/http/signature.js";
 import worker from "../src/index.js";
-import { runDailyDigest } from "../src/modules/summary/application/use-cases/publish-daily-digest.js";
-import { processDuePages } from "../src/modules/summary/application/use-cases/summarize-pages.js";
+import { runDailyDigest } from "../src/modules/summary/application/usecases/publish-daily-digest.js";
+import { processDuePages } from "../src/modules/summary/application/usecases/summarize-pages.js";
 import { FakeD1 } from "./helpers/fakeD1.js";
 
 describe("日次通知", () => {

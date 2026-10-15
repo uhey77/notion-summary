@@ -262,7 +262,7 @@ src/
       application/
         options.ts                # ユースケースごとの設定
         ports/                    # Repository・外部サービス・Loggerの契約
-        use-cases/                # 更新記録・要約生成・日次配信
+        usecases/                # 更新記録・要約生成・日次配信
       infrastructure/
         persistence/              # D1・DB行とドメインモデルの変換
         notion/                   # Notion API・Markdown変換

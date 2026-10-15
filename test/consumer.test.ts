@@ -3,12 +3,12 @@ import type { AppConfig } from "../src/config/types.js";
 import {
   type DigestDeps,
   runDailyDigest,
-} from "../src/modules/summary/application/use-cases/publish-daily-digest.js";
+} from "../src/modules/summary/application/usecases/publish-daily-digest.js";
 import {
   type SummaryDeps,
   processDuePage,
   processDuePages,
-} from "../src/modules/summary/application/use-cases/summarize-pages.js";
+} from "../src/modules/summary/application/usecases/summarize-pages.js";
 import { GeminiSummarizer } from "../src/modules/summary/infrastructure/gemini/summarizer.js";
 import {
   D1SummaryRepository as Db,

@@ -5,12 +5,12 @@ import type {
   PreparedDigestPart,
 } from "../src/modules/summary/application/ports/services.js";
 import { ExternalServiceError } from "../src/modules/summary/application/ports/services.js";
-import { runDailyDigest } from "../src/modules/summary/application/use-cases/publish-daily-digest.js";
-import { recordPageUpdate } from "../src/modules/summary/application/use-cases/record-page-update.js";
+import { runDailyDigest } from "../src/modules/summary/application/usecases/publish-daily-digest.js";
+import { recordPageUpdate } from "../src/modules/summary/application/usecases/record-page-update.js";
 import {
   type SummaryDeps,
   processDuePage,
-} from "../src/modules/summary/application/use-cases/summarize-pages.js";
+} from "../src/modules/summary/application/usecases/summarize-pages.js";
 import { PageSummary } from "../src/modules/summary/domain/page-summary.js";
 
 const NOW = new Date("2026-10-15T00:00:05.000Z");
