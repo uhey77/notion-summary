@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { NotionApiError, NotionClient, extractPageId } from "../src/services/notion.js";
+import {
+  NotionApiError,
+  NotionClient,
+  extractPageId,
+} from "../src/modules/summary/infrastructure/notion/client.js";
 import { createFetchMock } from "./helpers/fetchMock.js";
 
 const BASE_OPTS = {
