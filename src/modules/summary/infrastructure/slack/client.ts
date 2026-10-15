@@ -8,7 +8,8 @@
  * 投稿の冪等性 (投稿済みチャンネルの除外) は呼び出し側 (consumer) が担う。
  * 本クライアントは「与えられたチャンネルへ投稿し、結果を返す」ことに徹する。
  */
-import type { SlackPostResult } from "../types.js";
+import type { DeliveryResult } from "../../application/ports/services.js";
+import type { DigestItem } from "../../domain/digest.js";
 
 const SLACK_POST_URL = "https://slack.com/api/chat.postMessage";
 const HEADER_TITLE_MAX = 140;
@@ -34,15 +35,7 @@ export interface SlackMessage {
 }
 
 /** ダイジェスト 1 記事分の入力。 */
-export interface DigestItemInput {
-  pageId: string;
-  title: string;
-  /** Gemini が生成した Markdown 要約本文。 */
-  summaryMarkdown: string;
-  url: string;
-  category: string;
-  author: string;
-}
+export type DigestItemInput = DigestItem;
 
 export interface DigestMessageInput {
   /** 全記事数 (header 表示用。分割しても総数を出す)。 */
@@ -71,7 +64,7 @@ export class SlackClient {
   }
 
   /** 1 チャンネルへ投稿する。例外は握りつぶさず結果オブジェクトへ写す (握りつぶし禁止に対応)。 */
-  async postMessage(channel: string, message: SlackMessage): Promise<SlackPostResult> {
+  async postMessage(channel: string, message: SlackMessage): Promise<DeliveryResult> {
     try {
       const res = await this.fetchImpl(SLACK_POST_URL, {
         method: "POST",
@@ -92,8 +85,8 @@ export class SlackClient {
   }
 
   /** 複数チャンネルへ順に投稿し、すべての結果を返す (個別失敗で止めない)。 */
-  async postToChannels(channels: string[], message: SlackMessage): Promise<SlackPostResult[]> {
-    const results: SlackPostResult[] = [];
+  async postToChannels(channels: string[], message: SlackMessage): Promise<DeliveryResult[]> {
+    const results: DeliveryResult[] = [];
     for (const channel of channels) {
       results.push(await this.postMessage(channel, message));
     }

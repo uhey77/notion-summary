@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { type NotionBlock, blocksToMarkdown } from "../src/markdown.js";
+import {
+  type NotionBlock,
+  blocksToMarkdown,
+} from "../src/modules/summary/infrastructure/notion/markdown.js";
 
 /** rich_text を1要素持つブロックを作る簡易ヘルパー。 */
 function block(type: string, text: string, extra: Record<string, unknown> = {}): NotionBlock {

@@ -1,7 +1,7 @@
 /**
  * テスト用の最小 in-memory D1 フェイク。
- * src/db.ts が発行する固定クエリだけを認識し、page_state / summary_jobs を Map に保持する。
- * 本物の SQL エンジンではないので、db.ts のクエリと対応関係を合わせて維持すること。
+ * src/modules/summary/infrastructure/persistence/d1-summary-repository.ts が発行する固定クエリだけを認識し、page_state / summary_jobs を Map に保持する。
+ * 本物の SQL エンジンではないので、D1リポジトリのクエリと対応関係を合わせて維持すること。
  */
 import type { D1Database } from "@cloudflare/workers-types";
 

@@ -9,14 +9,14 @@
  */
 import type { D1Database } from "@cloudflare/workers-types";
 
-export type PageStatus = "pending" | "processing" | "completed" | "failed" | "skipped";
-export type JobStatus = "queued" | "processing" | "completed" | "failed" | "skipped";
+import type { JobStatus, SummaryRepository } from "../../application/ports/repositories.js";
+import { type PageStatus, PageSummary } from "../../domain/page-summary.js";
 
 export interface PageStateRow {
   page_id: string;
   latest_last_edited_time: string;
   debounce_until: string;
-  status: string;
+  status: PageStatus;
   lock_until: string | null;
   last_summarized_at: string | null;
   last_summary: string | null;
@@ -32,7 +32,7 @@ export interface PageStateRow {
   updated_at: string;
 }
 
-export class Db {
+export class D1SummaryRepository implements SummaryRepository {
   constructor(private readonly db: D1Database) {}
 
   /**
@@ -60,12 +60,12 @@ export class Db {
       .run();
   }
 
-  async getPageState(pageId: string): Promise<PageStateRow | null> {
+  async getPageState(pageId: string): Promise<PageSummary | null> {
     const row = await this.db
       .prepare("SELECT * FROM page_state WHERE page_id = ?")
       .bind(pageId)
       .first<PageStateRow>();
-    return row ?? null;
+    return row ? toPageSummary(row) : null;
   }
 
   /**
@@ -73,7 +73,7 @@ export class Db {
    * status='pending' かつ debounce_until <= now かつ lock が空き、のものを古い順に limit 件。
    * lock の最終ガードは acquireLock 側の条件付き UPDATE で行う。
    */
-  async getDuePages(now: string, limit: number): Promise<PageStateRow[]> {
+  async getDuePages(now: string, limit: number): Promise<PageSummary[]> {
     const result = await this.db
       .prepare(
         `SELECT * FROM page_state
@@ -85,20 +85,20 @@ export class Db {
       )
       .bind(now, now, limit)
       .all<PageStateRow>();
-    return result.results ?? [];
+    return (result.results ?? []).map(toPageSummary);
   }
 
   /**
    * ダイジェスト対象 = 要約済み・未配信のページを古い順に返す (日次ダイジェスト)。
    * 件数は 1 日分なので全件返す (LIMIT なし)。
    */
-  async getSummarizedPages(): Promise<PageStateRow[]> {
+  async getSummarizedPages(): Promise<PageSummary[]> {
     const result = await this.db
       .prepare(
         `SELECT * FROM page_state WHERE status = 'summarized' ORDER BY last_summarized_at ASC`,
       )
       .all<PageStateRow>();
-    return result.results ?? [];
+    return (result.results ?? []).map(toPageSummary);
   }
 
   /** ページに紐づく最新の summary_jobs を返す (Cron 実行結果の記録対象)。 */
@@ -343,4 +343,21 @@ function parseChannelMap(raw: string | null): Record<string, string> {
   } catch {
     return {};
   }
+}
+
+/** DB行から業務モデルへの変換は永続化アダプターの責務。 */
+export function toPageSummary(row: PageStateRow): PageSummary {
+  return new PageSummary(
+    row.page_id,
+    row.status,
+    row.latest_last_edited_time,
+    row.debounce_until,
+    row.last_summarized_at,
+    row.retry_count,
+    row.last_summary,
+    row.last_title,
+    row.last_url,
+    row.last_category,
+    row.last_author,
+  );
 }

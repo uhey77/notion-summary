@@ -4,7 +4,7 @@ import {
   GeminiError,
   SUMMARY_ERROR_PREFIX,
   buildPrompt,
-} from "../src/services/gemini.js";
+} from "../src/modules/summary/infrastructure/gemini/client.js";
 import { createFetchMock } from "./helpers/fetchMock.js";
 
 const BASE_OPTS = {

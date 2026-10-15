@@ -251,24 +251,29 @@ Queue の作成は不要(Cron 構成のため)。詳細な仕様は [docs/spec.m
 
 ```txt
 src/
-  index.ts              # Worker entrypoint (fetch ルーティング + scheduled/Cron)
-  config.ts             # env からの設定読み込み・デフォルト適用
-  types.ts              # 共有型 (Env など)
-  db.ts                 # D1 リポジトリ (page_state / summary_jobs / lock / getDuePages)
-  markdown.ts           # Notion ブロック → Markdown 変換
-  handlers/
-    webhook.ts          # POST /notion/webhook (pending を D1 に記録)
-    consumer.ts         # Cron 駆動の要約処理 (processDuePages)
-  services/
-    notion.ts           # Notion API クライアント
-    gemini.ts           # Gemini 要約
-    slack.ts            # Slack 投稿
-  utils/
-    crypto.ts           # Webhook 署名検証 (HMAC-SHA256)
-    logger.ts           # 構造化ログ
-migrations/0001_init.sql  # D1 スキーマ
-test/                     # Vitest (fetch / D1 をモック)
+  index.ts                        # Worker entrypoint・依存関係の組み立て
+  api/
+    http/                         # Webhook・署名検証・HTTPレスポンス
+    cron/                         # Cronからユースケースへの振り分け
+  config/                         # Env・設定読み込み・デフォルト値
+  modules/
+    summary/
+      domain/                     # ページ要約・時刻判定・配信対象期間
+      application/
+        options.ts                # ユースケースごとの設定
+        ports/                    # Repository・外部サービス・Loggerの契約
+        usecases/                # 更新記録・要約生成・日次配信
+      infrastructure/
+        persistence/              # D1・DB行とドメインモデルの変換
+        notion/                   # Notion API・Markdown変換
+        gemini/                   # Gemini API・プロンプト・エラー変換
+        slack/                    # Slack API・メッセージ整形・配信
+        logging/                  # 構造化ログ
+migrations/                       # 既存のD1スキーマ
+test/                             # Vitest（外部API・D1をモック）
 ```
+
+業務モデルと判定ルールはdomain、処理の流れと依存先の契約はapplication、D1・外部APIの具体実装はinfrastructureに置きます。apiはapplicationのユースケースを呼び出し、index.tsで具体実装を組み立てます。
 
 ### 実装上の前提・判断
 

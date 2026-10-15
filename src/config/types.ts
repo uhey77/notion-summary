@@ -1,9 +1,10 @@
-/**
- * 共有型定義。
- * Cloudflare bindings (Env)、Notion / Slack の最小型を集約する。
- *
- * 無料構成: Cloudflare Queues は使わず、Cron Trigger + D1 ポーリングで遅延実行する。
- */
+import type {
+  DigestOptions,
+  SummaryOptions,
+  UpdateOptions,
+} from "../modules/summary/application/options.js";
+import type { LogLevel } from "../modules/summary/application/ports/logger.js";
+import type { SummaryLength, SummaryStyle } from "../modules/summary/domain/summary.js";
 
 /** Cloudflare Workers の環境 bindings / vars / secrets。 */
 export interface Env {
@@ -47,16 +48,10 @@ export interface Env {
   SLACK_SUMMARY_CHANNEL_ID?: string;
 }
 
-export type SummaryLength = "short" | "medium" | "long";
-export type SummaryStyle = "bullet" | "paragraph";
-
-/** config.ts が env から組み立てる、デフォルト適用済みの設定値。 */
-export interface AppConfig {
+/** 起動時の設定。ユースケースには必要な項目だけを渡す。 */
+export interface AppConfig extends SummaryOptions, DigestOptions, UpdateOptions {
   notionVersion: string;
-  notionDatabaseId?: string;
   notionEventTypes: string[];
-  summaryDelaySeconds: number;
-  summaryMinIntervalSeconds: number;
   geminiModel: string;
   summaryLength: SummaryLength;
   summaryStyle: SummaryStyle;
@@ -67,10 +62,6 @@ export interface AppConfig {
   debugVerbose: boolean;
   logLevel: LogLevel;
   summaryMaxRetries: number;
-  cronMaxPages: number;
-  digestItemMaxChars: number;
-  digestMaxRetries: number;
-  // secrets (存在しない可能性がある — 利用箇所でガードする)
   notionApiToken?: string;
   notionWebhookToken?: string;
   geminiApiKey?: string;
@@ -78,33 +69,4 @@ export interface AppConfig {
   geminiProvider?: "gemini" | "vertex";
   vertexProjectId?: string;
   slackBotToken?: string;
-  slackChannelIds: string[];
-}
-
-export type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
-
-/** Notion ページ取得結果のうち、要約に必要な最小情報。 */
-export interface NotionPageInfo {
-  id: string;
-  title: string;
-  url: string;
-  lastEditedTime: string;
-  parentDatabaseId?: string;
-  /** 最終更新者の user id (名前は Users API で別途解決する)。 */
-  lastEditedById?: string;
-}
-
-/** Markdown 化された本文と、省略が発生したかどうか。 */
-export interface NotionPageContent {
-  markdown: string;
-  blockCount: number;
-  truncated: boolean;
-}
-
-/** Slack 1 チャンネルへの投稿結果。 */
-export interface SlackPostResult {
-  channel: string;
-  ok: boolean;
-  ts?: string;
-  error?: string;
 }
