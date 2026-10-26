@@ -46,6 +46,18 @@ describe("buildPrompt", () => {
     expect(p).toContain("重複を避ける"); // 冗長・重複の排除
   });
 
+  it("推敲ルールの後でSlack表記と箇条書きの維持を指定する", () => {
+    const p = buildPrompt({ title: "T", markdown: "M" }, "medium", "bullet");
+    const slackRules = p.slice(p.indexOf("# Slackの出力表記"), p.indexOf("# 入力文書"));
+    expect(slackRules).toContain("本文はSlackのmrkdwnで書く");
+    expect(slackRules).toContain("各項目の先頭は「• 」");
+    expect(slackRules).toContain("項目ごとに改行する");
+    expect(slackRules).toContain("*太字*");
+    expect(slackRules).toContain("<https://example.com|表示名>");
+    expect(slackRules).toContain("箇条書きは維持する");
+    expect(p).not.toContain("見出し、太字、入れ子");
+  });
+
   it("旧medium指定でも割合に基づく目安を使う", () => {
     const p = buildPrompt({ title: "T", markdown: "M" }, "medium", "bullet");
     expect(p).toContain("原文の10%");

@@ -18,7 +18,6 @@ const FALLBACK_TEXT_MAX = 3000;
 // ダイジェスト分割の上限。Slack の blocks(<=50) / 全体サイズに対し余裕をもたせる。
 const MAX_BLOCKS_PER_MESSAGE = 45;
 const MAX_TEXT_PER_MESSAGE = 28000;
-const DIGEST_HEADER = "今日の更新記事";
 
 export interface SummaryMessageInput {
   title: string;
@@ -38,7 +37,7 @@ export interface SlackMessage {
 export type DigestItemInput = DigestItem;
 
 export interface DigestMessageInput {
-  /** 全記事数 (header 表示用。分割しても総数を出す)。 */
+  /** 全記事数。互換性のため受け取るが、見出しには表示しない。 */
   count: number;
   items: DigestItemInput[];
   /** 互換性のため残す旧設定。本文の切り詰めには使用しない。 */
@@ -133,60 +132,51 @@ export function buildSummaryMessage(input: SummaryMessageInput): SlackMessage {
 export function buildDigestMessages(input: DigestMessageInput): DigestPart[] {
   // 本文は削らず、Slack の section 制限に合わせて分割する。
   const itemBlocks = input.items.flatMap((item, i) => {
-    const summary = markdownToPlainText(item.summaryMarkdown);
-    const text = `*${i + 1}. ${item.title}*\n👤 *最終更新者：${item.author}*\n${summary}\n<${item.url}|Notion で開く>`;
+    const summary = markdownToMrkdwn(item.summaryMarkdown);
+    const title = item.title.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const text = `*${i + 1}. <${item.url}|${title}>* by ${item.author}\n\n${summary}`;
     const chunks = splitForSection(text, SECTION_TEXT_MAX);
     return chunks.map((text, index) => ({
       text,
+      startsArticle: index === 0,
       // 記事の最後の部分が送信できた時点で配信済みにする。
       pageId: index === chunks.length - 1 ? item.pageId : undefined,
     }));
   });
 
-  // greedy パッキング: 各パートは header(1 block) + 記事 sections。
+  // greedy パッキング: 各パートは記事 sections + 記事間の divider。
   // block 数・累積文字数のどちらかが上限を超えたら新しいパートへ。
-  const groups: { texts: string[]; pageIds: string[]; chars: number }[] = [];
+  const groups: { texts: string[]; blocks: unknown[]; pageIds: string[]; chars: number }[] = [];
   for (const ib of itemBlocks) {
-    const last = groups[groups.length - 1];
+    let group = groups[groups.length - 1];
     if (
-      last === undefined ||
-      last.texts.length >= MAX_BLOCKS_PER_MESSAGE - 1 || // header 1 block 分を差し引く
-      last.chars + ib.text.length > MAX_TEXT_PER_MESSAGE
+      group === undefined ||
+      group.blocks.length + (ib.startsArticle ? 2 : 1) > MAX_BLOCKS_PER_MESSAGE ||
+      group.chars + ib.text.length > MAX_TEXT_PER_MESSAGE
     ) {
-      groups.push({
-        texts: [ib.text],
-        pageIds: ib.pageId ? [ib.pageId] : [],
-        chars: ib.text.length,
-      });
-    } else {
-      last.texts.push(ib.text);
-      if (ib.pageId) last.pageIds.push(ib.pageId);
-      last.chars += ib.text.length;
+      group = { texts: [], blocks: [], pageIds: [], chars: 0 };
+      groups.push(group);
     }
+    // メッセージの先頭・末尾や、同じ記事の分割 section 間には線を入れない。
+    if (ib.startsArticle && group.blocks.length > 0) group.blocks.push({ type: "divider" });
+    group.blocks.push({ type: "section", text: { type: "mrkdwn", text: ib.text } });
+    group.texts.push(ib.text);
+    if (ib.pageId) group.pageIds.push(ib.pageId);
+    group.chars += ib.text.length;
   }
 
-  const total = groups.length;
-  return groups.map((group, idx) => {
-    const headerText =
-      total > 1
-        ? `${DIGEST_HEADER}: ${input.count}件 (${idx + 1}/${total})`
-        : `${DIGEST_HEADER}: ${input.count}件`;
-    const blocks: unknown[] = [
-      {
-        type: "header",
-        text: { type: "plain_text", text: truncate(headerText, HEADER_TITLE_MAX), emoji: true },
-      },
-      ...group.texts.map((text) => ({ type: "section", text: { type: "mrkdwn", text } })),
-    ];
+  return groups.map((group) => {
     const fallback = truncate(
-      `${headerText}\n${group.texts.map((text) => markdownToPlainText(text).replace(/<([^>|]+)\|([^>]+)>/g, "$2: $1")).join("\n\n")}`,
+      group.texts
+        .map((text) => markdownToPlainText(text).replace(/<([^>|]+)\|([^>]+)>/g, "$2: $1"))
+        .join("\n\n"),
       FALLBACK_TEXT_MAX,
     );
-    return { message: { text: fallback, blocks }, pageIds: group.pageIds };
+    return { message: { text: fallback, blocks: group.blocks }, pageIds: group.pageIds };
   });
 }
 
-/** 要約の装飾を取り除き、Slack 本文と通知プレビューで読める文章にする。 */
+/** 要約の装飾を取り除き、通知プレビューで読める文章にする。 */
 export function markdownToPlainText(markdown: string): string {
   return markdownToMrkdwn(markdown)
     .replace(/```(?:[^\n`]*\n)?([\s\S]*?)```/g, "$1")
@@ -194,16 +184,16 @@ export function markdownToPlainText(markdown: string): string {
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)")
     .replace(/\*+([^*\n]+)\*+/g, "$1")
     .replace(/_+([^_\n]+)_+/g, "$1")
-    .replace(/~~([^~\n]+)~~/g, "$1");
+    .replace(/~+([^~\n]+)~+/g, "$1");
 }
 
 /**
  * Markdown を Slack mrkdwn へ変換する (spec §13)。
- * fenced code block の内側は変換せず維持する。
+ * fenced code block とインラインコードの内側は変換せず維持する。
  */
 export function markdownToMrkdwn(markdown: string): string {
-  // ```...``` を捕捉して分割。奇数インデックスが code block。
-  const segments = markdown.split(/(```[\s\S]*?```)/g);
+  // コードを捕捉して分割。奇数インデックスは変換しない。
+  const segments = markdown.split(/(```[\s\S]*?```|`[^`\n]+`)/g);
   return segments
     .map((segment, index) => (index % 2 === 1 ? segment : convertNonCode(segment)))
     .join("");
@@ -223,6 +213,8 @@ function convertNonCode(text: string): string {
 
   // 強調記法を Slack 形式へ。
   let result = converted.replace(/\*\*([^*]+)\*\*/g, "*$1*").replace(/__([^_]+)__/g, "_$1_");
+  result = result.replace(/~~([^~\n]+)~~/g, "~$1~");
+  result = result.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, "<$2|$1>");
 
   // `\1` `\2` のような番号プレースホルダを連番へ補正する。
   let counter = 0;

@@ -26,6 +26,19 @@ describe("markdownToMrkdwn", () => {
     expect(out).toContain("# これも");
   });
 
+  it("リンクと取り消し線をSlack形式へ変換し、インラインコードを維持する", () => {
+    expect(
+      markdownToMrkdwn(
+        "- [資料](https://example.com/doc) と ~~旧版~~\n- `**literal**` と `foo__bar__baz`",
+      ),
+    ).toBe("• <https://example.com/doc|資料> と ~旧版~\n• `**literal**` と `foo__bar__baz`");
+  });
+
+  it("Slack形式の箇条書き・強調・リンクをそのまま維持する", () => {
+    const text = "• *要点* と _補足_\n1. 次の手順\n<https://example.com|資料>";
+    expect(markdownToMrkdwn(text)).toBe(text);
+  });
+
   it("\\1 \\2 の番号プレースホルダを連番へ補正する", () => {
     expect(markdownToMrkdwn("\\1 最初\n\\2 次")).toBe("1 最初\n2 次");
   });
@@ -92,16 +105,55 @@ describe("buildDigestMessages", () => {
       author: `著者${i}`,
     }));
 
-  it("1通に収まる場合は header + 連番の各記事 section を返す (作成者表示)", () => {
+  it("タイトルリンクと最終更新者を同じ行に表示し、記事間に区切り線を入れる", () => {
     const parts = buildDigestMessages({ count: 2, items: items(2), itemMaxChars: 700 });
     expect(parts).toHaveLength(1);
     const rendered = JSON.stringify(parts[0].message.blocks);
-    expect(rendered).toContain("今日の更新記事: 2件");
-    expect(rendered).toContain("*1. 記事0*");
-    expect(rendered).toContain("*2. 記事1*");
-    expect(rendered).toContain("👤 *最終更新者：著者0*");
-    expect(parts[0].message.text).toContain("👤 最終更新者：著者0");
+    expect(rendered).not.toContain("今日の更新記事");
+    expect(parts[0].message.text).toMatch(/^1\. 記事0: https:\/\/notion.so\/p0/);
+    expect(rendered).toContain("*1. <https://notion.so/p0|記事0>*");
+    expect(rendered).toContain("*2. <https://notion.so/p1|記事1>*");
+    expect(rendered).not.toContain("Notion で開く");
+    expect((parts[0].message.blocks as Array<{ type: string }>).map((b) => b.type)).toEqual([
+      "section",
+      "divider",
+      "section",
+    ]);
+    const firstSection = parts[0].message.blocks[0] as { text: { text: string } };
+    expect(firstSection.text.text).toBe("*1. <https://notion.so/p0|記事0>* by 著者0\n\n• 要点0");
+    expect(rendered).not.toContain("最終更新者：");
+    expect(rendered).not.toContain("👤");
+    expect(parts[0].message.text).toContain("記事0: https://notion.so/p0 by 著者0");
     expect(parts[0].pageIds).toEqual(["p0", "p1"]);
+  });
+
+  it("区切り線を含めてブロック上限内に分割し、各パートの前後に線を置かない", () => {
+    const parts = buildDigestMessages({ count: 50, items: items(50), itemMaxChars: 700 });
+    expect(parts.length).toBeGreaterThan(1);
+    for (const part of parts) {
+      const types = (part.message.blocks as Array<{ type: string }>).map((b) => b.type);
+      expect(types.length).toBeLessThanOrEqual(45);
+      expect(types[0]).toBe("section");
+      expect(types).not.toContain("header");
+      expect(part.message.text).not.toContain("今日の更新記事");
+      expect(types.at(-1)).toBe("section");
+      expect(types.filter((type) => type === "divider")).toHaveLength(part.pageIds.length - 1);
+    }
+    expect(parts.flatMap((part) => part.pageIds)).toEqual(items(50).map((item) => item.pageId));
+    expect(JSON.stringify(parts.at(-1)?.message.blocks)).toContain(
+      "*50. <https://notion.so/p49|記事49>*",
+    );
+  });
+
+  it("タイトル内の山括弧とアンパサンドをリンクの表示文字として扱う", () => {
+    const [part] = buildDigestMessages({
+      count: 1,
+      items: [{ ...items(1)[0], title: "比較 <A & B>" }],
+      itemMaxChars: 700,
+    });
+    expect(JSON.stringify(part.message.blocks)).toContain(
+      "<https://notion.so/p0|比較 &lt;A &amp; B&gt;>",
+    );
   });
 
   it("旧itemMaxCharsを超えても全文を表示する", () => {
@@ -122,7 +174,7 @@ describe("buildDigestMessages", () => {
     expect(section?.text?.text).toContain("x".repeat(500));
   });
 
-  it("上限超過で複数パートに分割し、pageIds を網羅・header に (k/total)", () => {
+  it("上限超過で見出しを付けずに複数パートに分割し、pageIds を網羅する", () => {
     const many = Array.from({ length: 11 }, (_, i) => ({
       pageId: `p${i}`,
       title: `記事${i}`,
@@ -135,7 +187,10 @@ describe("buildDigestMessages", () => {
     expect(parts.length).toBeGreaterThan(1);
     const allIds = parts.flatMap((p) => p.pageIds).sort();
     expect(allIds).toEqual(many.map((m) => m.pageId).sort());
-    expect(JSON.stringify(parts[0].message.blocks)).toContain("(1/");
+    for (const part of parts) {
+      expect(part.message.blocks).not.toContainEqual(expect.objectContaining({ type: "header" }));
+      expect(part.message.text).not.toContain("今日の更新記事");
+    }
   });
 });
 
@@ -181,7 +236,7 @@ describe("digest plain text", () => {
     );
   });
 
-  it("本文とプレビューで装飾を除去し、Notionリンクを維持する", () => {
+  it("本文はSlackの書式を維持し、プレビューのみ装飾を除去する", () => {
     const [part] = buildDigestMessages({
       count: 1,
       itemMaxChars: 200,
@@ -191,15 +246,23 @@ describe("digest plain text", () => {
           title: "オンボーディング",
           author: "田辺",
           category: "c",
-          summaryMarkdown: "- **Slack**は*コミュニケーション*に使う。",
+          summaryMarkdown:
+            "- **Slack**は*コミュニケーション*に使う。\n- `npm run test`で確認する。\n- [資料](https://example.com/doc)を参照する。",
           url: "https://notion.so/p",
         },
       ],
     });
-    expect(JSON.stringify(part.message.blocks)).toContain("• Slackはコミュニケーションに使う。");
-    expect(JSON.stringify(part.message.blocks)).toContain("<https://notion.so/p|Notion で開く>");
+    const section = part.message.blocks[0] as { text: { type: string; text: string } };
+    expect(section.text.type).toBe("mrkdwn");
+    expect(section.text.text).toContain("• *Slack*は*コミュニケーション*に使う。");
+    expect(section.text.text).toContain("• `npm run test`で確認する。");
+    expect(section.text.text).toContain("• <https://example.com/doc|資料>を参照する。");
+    expect(JSON.stringify(part.message.blocks)).toContain("<https://notion.so/p|オンボーディング>");
     expect(part.message.text).not.toContain("*");
-    expect(part.message.text).toContain("Notion で開く: https://notion.so/p");
+    expect(part.message.text).not.toContain("`");
+    expect(part.message.text).toContain("• Slackはコミュニケーションに使う。");
+    expect(part.message.text).toContain("資料: https://example.com/doc");
+    expect(part.message.text).toContain("オンボーディング: https://notion.so/p");
   });
 });
 
@@ -224,7 +287,12 @@ it("長い記事を削らず分割し、最後のパートでのみ配信済み�
     .filter((b) => b.type === "section");
   const rendered = sections.map((b) => b.text?.text).join("");
   expect(rendered).toContain(summary);
-  expect(rendered).toContain("<https://notion.so/long|Notion で開く>");
+  expect(rendered).toContain("<https://notion.so/long|長文>");
+  expect(
+    parts
+      .flatMap((part) => part.message.blocks as Array<{ type: string }>)
+      .some((block) => block.type === "divider"),
+  ).toBe(false);
   expect(sections.every((b) => (b.text?.text.length ?? 0) <= 2800)).toBe(true);
   expect(parts.length).toBeGreaterThan(1);
   expect(parts.slice(0, -1).flatMap((p) => p.pageIds)).toEqual([]);
