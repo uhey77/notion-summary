@@ -98,6 +98,7 @@ export function buildSummaryMessage(input: SummaryMessageInput): SlackMessage {
   const headerTitle = truncate(`要約: ${input.title}`, HEADER_TITLE_MAX);
   const mrkdwn = markdownToMrkdwn(input.summaryMarkdown);
   const summaryChunks = splitForSection(mrkdwn, SECTION_TEXT_MAX);
+  const codeState = { inCode: false };
 
   const blocks: unknown[] = [
     { type: "header", text: { type: "plain_text", text: headerTitle, emoji: true } },
@@ -109,10 +110,9 @@ export function buildSummaryMessage(input: SummaryMessageInput): SlackMessage {
       ],
     },
     { type: "divider" },
-    ...summaryChunks.map((chunk) => ({
-      type: "section",
-      text: { type: "mrkdwn", text: chunk },
-    })),
+    ...summaryChunks.flatMap((chunk) =>
+      summaryToBlocks(chunk, codeState).map(({ block }) => block),
+    ),
     {
       type: "context",
       elements: [{ type: "mrkdwn", text: `<${input.url}|Notion で開く>` }],
@@ -136,11 +136,13 @@ export function buildDigestMessages(input: DigestMessageInput): DigestPart[] {
     const title = item.title.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const text = `*${i + 1}. <${item.url}|${title}>* by ${item.author}\n\n${summary}`;
     const chunks = splitForSection(text, SECTION_TEXT_MAX);
-    return chunks.map((text, index) => ({
-      text,
+    const codeState = { inCode: false };
+    const blocks = chunks.flatMap((chunk) => summaryToBlocks(chunk, codeState));
+    return blocks.map((block, index) => ({
+      ...block,
       startsArticle: index === 0,
       // 記事の最後の部分が送信できた時点で配信済みにする。
-      pageId: index === chunks.length - 1 ? item.pageId : undefined,
+      pageId: index === blocks.length - 1 ? item.pageId : undefined,
     }));
   });
 
@@ -159,7 +161,7 @@ export function buildDigestMessages(input: DigestMessageInput): DigestPart[] {
     }
     // メッセージの先頭・末尾や、同じ記事の分割 section 間には線を入れない。
     if (ib.startsArticle && group.blocks.length > 0) group.blocks.push({ type: "divider" });
-    group.blocks.push({ type: "section", text: { type: "mrkdwn", text: ib.text } });
+    group.blocks.push(ib.block);
     group.texts.push(ib.text);
     if (ib.pageId) group.pageIds.push(ib.pageId);
     group.chars += ib.text.length;
@@ -174,6 +176,118 @@ export function buildDigestMessages(input: DigestMessageInput): DigestPart[] {
     );
     return { message: { text: fallback, blocks: group.blocks }, pageIds: group.pageIds };
   });
+}
+
+type RichInline =
+  | {
+      type: "text";
+      text: string;
+      style?: { bold?: boolean; italic?: boolean; strike?: boolean; code?: boolean };
+    }
+  | { type: "link"; url: string; text?: string };
+
+/** mrkdwn のリスト行を Slack の rich_text_list として組み立てる。 */
+function summaryToBlocks(
+  text: string,
+  codeState: { inCode: boolean },
+): { text: string; block: unknown }[] {
+  const result: { text: string; block: unknown }[] = [];
+  let paragraphs: string[] = [];
+  let list: string[] = [];
+  let listStyle: "bullet" | "ordered" = "bullet";
+  let listOffset = 0;
+  const flushParagraphs = () => {
+    const value = paragraphs.join("\n");
+    if (value.trim())
+      result.push({
+        text: value,
+        block: { type: "section", text: { type: "mrkdwn", text: value } },
+      });
+    paragraphs = [];
+  };
+  const flushList = () => {
+    if (list.length) {
+      result.push({
+        text: list
+          .map(
+            (item, index) =>
+              `${listStyle === "bullet" ? "•" : `${listOffset + index + 1}.`} ${item}`,
+          )
+          .join("\n"),
+        block: {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_list",
+              style: listStyle,
+              ...(listStyle === "ordered" && listOffset > 0 ? { offset: listOffset } : {}),
+              elements: list.map((item) => ({
+                type: "rich_text_section",
+                elements: parseRichInline(item),
+              })),
+            },
+          ],
+        },
+      });
+    }
+    list = [];
+  };
+  for (const line of text.split("\n")) {
+    const fence = /^\s*```/.test(line);
+    const match =
+      codeState.inCode || fence ? null : line.match(/^\s*(?:([•*+-])\s+|(\d+)\.\s+)(.+)$/);
+    if (fence) codeState.inCode = !codeState.inCode;
+    if (match) {
+      const style = match[2] ? "ordered" : "bullet";
+      if (list.length && style !== listStyle) flushList();
+      flushParagraphs();
+      if (!list.length) {
+        listStyle = style;
+        listOffset = match[2] ? Number(match[2]) - 1 : 0;
+      }
+      list.push(match[3]);
+    } else {
+      flushList();
+      paragraphs.push(line);
+    }
+  }
+  flushList();
+  flushParagraphs();
+  return result;
+}
+
+/** リスト項目のリンクとインライン装飾を rich text の要素へ変換する。 */
+function parseRichInline(text: string): RichInline[] {
+  const result: RichInline[] = [];
+  const pattern =
+    /<((?:https?:\/\/)[^>|]+)(?:\|([^>]+))?>|`([^`\n]+)`|\*([^*\n]+)\*|_([^_\n]+)_|~([^~\n]+)~/g;
+  let cursor = 0;
+  const decode = (value: string) =>
+    value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index;
+    if (index > cursor) result.push({ type: "text", text: decode(text.slice(cursor, index)) });
+    if (match[1])
+      result.push({
+        type: "link",
+        url: decode(match[1]),
+        ...(match[2] ? { text: decode(match[2]) } : {}),
+      });
+    else {
+      const value = match[3] ?? match[4] ?? match[5] ?? match[6];
+      const style = match[3]
+        ? { code: true }
+        : match[4]
+          ? { bold: true }
+          : match[5]
+            ? { italic: true }
+            : { strike: true };
+      result.push({ type: "text", text: decode(value), style });
+    }
+    cursor = index + match[0].length;
+  }
+  if (cursor < text.length) result.push({ type: "text", text: decode(text.slice(cursor)) });
+  return result;
 }
 
 /** 要約の装飾を取り除き、通知プレビューで読める文章にする。 */

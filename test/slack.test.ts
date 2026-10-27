@@ -116,11 +116,13 @@ describe("buildDigestMessages", () => {
     expect(rendered).not.toContain("Notion で開く");
     expect((parts[0].message.blocks as Array<{ type: string }>).map((b) => b.type)).toEqual([
       "section",
+      "rich_text",
       "divider",
       "section",
+      "rich_text",
     ]);
     const firstSection = parts[0].message.blocks[0] as { text: { text: string } };
-    expect(firstSection.text.text).toBe("*1. <https://notion.so/p0|記事0>* by 著者0\n\n• 要点0");
+    expect(firstSection.text.text).toBe("*1. <https://notion.so/p0|記事0>* by 著者0\n");
     expect(rendered).not.toContain("最終更新者：");
     expect(rendered).not.toContain("👤");
     expect(parts[0].message.text).toContain("記事0: https://notion.so/p0 by 著者0");
@@ -136,7 +138,7 @@ describe("buildDigestMessages", () => {
       expect(types[0]).toBe("section");
       expect(types).not.toContain("header");
       expect(part.message.text).not.toContain("今日の更新記事");
-      expect(types.at(-1)).toBe("section");
+      expect(types.at(-1)).not.toBe("divider");
       expect(types.filter((type) => type === "divider")).toHaveLength(part.pageIds.length - 1);
     }
     expect(parts.flatMap((part) => part.pageIds)).toEqual(items(50).map((item) => item.pageId));
@@ -172,6 +174,32 @@ describe("buildDigestMessages", () => {
       parts[0].message.blocks as Array<{ type: string; text?: { text: string } }>
     ).find((b) => b.type === "section");
     expect(section?.text?.text).toContain("x".repeat(500));
+  });
+
+  it("番号付きリストをSlackのリストにし、コードブロック内の記号はそのまま残す", () => {
+    const [part] = buildDigestMessages({
+      count: 1,
+      items: [{ ...items(1)[0], summaryMarkdown: "説明\n3. 最初\n4. 次\n```\n- コード\n```" }],
+      itemMaxChars: 700,
+    });
+    const list = part.message.blocks.find(
+      (block) => (block as { type: string }).type === "rich_text",
+    );
+    expect(list).toEqual({
+      type: "rich_text",
+      elements: [
+        {
+          type: "rich_text_list",
+          style: "ordered",
+          offset: 2,
+          elements: [
+            { type: "rich_text_section", elements: [{ type: "text", text: "最初" }] },
+            { type: "rich_text_section", elements: [{ type: "text", text: "次" }] },
+          ],
+        },
+      ],
+    });
+    expect(JSON.stringify(part.message.blocks)).toContain("- コード");
   });
 
   it("上限超過で見出しを付けずに複数パートに分割し、pageIds を網羅する", () => {
@@ -254,9 +282,40 @@ describe("digest plain text", () => {
     });
     const section = part.message.blocks[0] as { text: { type: string; text: string } };
     expect(section.text.type).toBe("mrkdwn");
-    expect(section.text.text).toContain("• *Slack*は*コミュニケーション*に使う。");
-    expect(section.text.text).toContain("• `npm run test`で確認する。");
-    expect(section.text.text).toContain("• <https://example.com/doc|資料>を参照する。");
+    expect(part.message.blocks[1]).toEqual({
+      type: "rich_text",
+      elements: [
+        {
+          type: "rich_text_list",
+          style: "bullet",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "text", text: "Slack", style: { bold: true } },
+                { type: "text", text: "は" },
+                { type: "text", text: "コミュニケーション", style: { bold: true } },
+                { type: "text", text: "に使う。" },
+              ],
+            },
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "text", text: "npm run test", style: { code: true } },
+                { type: "text", text: "で確認する。" },
+              ],
+            },
+            {
+              type: "rich_text_section",
+              elements: [
+                { type: "link", url: "https://example.com/doc", text: "資料" },
+                { type: "text", text: "を参照する。" },
+              ],
+            },
+          ],
+        },
+      ],
+    });
     expect(JSON.stringify(part.message.blocks)).toContain("<https://notion.so/p|オンボーディング>");
     expect(part.message.text).not.toContain("*");
     expect(part.message.text).not.toContain("`");
