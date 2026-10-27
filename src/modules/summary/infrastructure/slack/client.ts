@@ -18,7 +18,6 @@ const FALLBACK_TEXT_MAX = 3000;
 // ダイジェスト分割の上限。Slack の blocks(<=50) / 全体サイズに対し余裕をもたせる。
 const MAX_BLOCKS_PER_MESSAGE = 45;
 const MAX_TEXT_PER_MESSAGE = 28000;
-const DIGEST_HEADER = "今日の更新記事";
 
 export interface SummaryMessageInput {
   title: string;
@@ -38,7 +37,7 @@ export interface SlackMessage {
 export type DigestItemInput = DigestItem;
 
 export interface DigestMessageInput {
-  /** 全記事数 (header 表示用。分割しても総数を出す)。 */
+  /** 全記事数。互換性のため受け取るが、見出しには表示しない。 */
   count: number;
   items: DigestItemInput[];
   /** 互換性のため残す旧設定。本文の切り詰めには使用しない。 */
@@ -99,6 +98,7 @@ export function buildSummaryMessage(input: SummaryMessageInput): SlackMessage {
   const headerTitle = truncate(`要約: ${input.title}`, HEADER_TITLE_MAX);
   const mrkdwn = markdownToMrkdwn(input.summaryMarkdown);
   const summaryChunks = splitForSection(mrkdwn, SECTION_TEXT_MAX);
+  const codeState = { inCode: false };
 
   const blocks: unknown[] = [
     { type: "header", text: { type: "plain_text", text: headerTitle, emoji: true } },
@@ -110,10 +110,9 @@ export function buildSummaryMessage(input: SummaryMessageInput): SlackMessage {
       ],
     },
     { type: "divider" },
-    ...summaryChunks.map((chunk) => ({
-      type: "section",
-      text: { type: "mrkdwn", text: chunk },
-    })),
+    ...summaryChunks.flatMap((chunk) =>
+      summaryToBlocks(chunk, codeState).map(({ block }) => block),
+    ),
     {
       type: "context",
       elements: [{ type: "mrkdwn", text: `<${input.url}|Notion で開く>` }],
@@ -133,60 +132,165 @@ export function buildSummaryMessage(input: SummaryMessageInput): SlackMessage {
 export function buildDigestMessages(input: DigestMessageInput): DigestPart[] {
   // 本文は削らず、Slack の section 制限に合わせて分割する。
   const itemBlocks = input.items.flatMap((item, i) => {
-    const summary = markdownToPlainText(item.summaryMarkdown);
-    const text = `*${i + 1}. ${item.title}*\n👤 *最終更新者：${item.author}*\n${summary}\n<${item.url}|Notion で開く>`;
+    const summary = markdownToMrkdwn(item.summaryMarkdown);
+    const title = item.title.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const text = `*${i + 1}. <${item.url}|${title}>* by ${item.author}\n\n${summary}`;
     const chunks = splitForSection(text, SECTION_TEXT_MAX);
-    return chunks.map((text, index) => ({
-      text,
+    const codeState = { inCode: false };
+    const blocks = chunks.flatMap((chunk) => summaryToBlocks(chunk, codeState));
+    return blocks.map((block, index) => ({
+      ...block,
+      startsArticle: index === 0,
       // 記事の最後の部分が送信できた時点で配信済みにする。
-      pageId: index === chunks.length - 1 ? item.pageId : undefined,
+      pageId: index === blocks.length - 1 ? item.pageId : undefined,
     }));
   });
 
-  // greedy パッキング: 各パートは header(1 block) + 記事 sections。
+  // greedy パッキング: 各パートは記事 sections + 記事間の divider。
   // block 数・累積文字数のどちらかが上限を超えたら新しいパートへ。
-  const groups: { texts: string[]; pageIds: string[]; chars: number }[] = [];
+  const groups: { texts: string[]; blocks: unknown[]; pageIds: string[]; chars: number }[] = [];
   for (const ib of itemBlocks) {
-    const last = groups[groups.length - 1];
+    let group = groups[groups.length - 1];
     if (
-      last === undefined ||
-      last.texts.length >= MAX_BLOCKS_PER_MESSAGE - 1 || // header 1 block 分を差し引く
-      last.chars + ib.text.length > MAX_TEXT_PER_MESSAGE
+      group === undefined ||
+      group.blocks.length + (ib.startsArticle ? 2 : 1) > MAX_BLOCKS_PER_MESSAGE ||
+      group.chars + ib.text.length > MAX_TEXT_PER_MESSAGE
     ) {
-      groups.push({
-        texts: [ib.text],
-        pageIds: ib.pageId ? [ib.pageId] : [],
-        chars: ib.text.length,
-      });
-    } else {
-      last.texts.push(ib.text);
-      if (ib.pageId) last.pageIds.push(ib.pageId);
-      last.chars += ib.text.length;
+      group = { texts: [], blocks: [], pageIds: [], chars: 0 };
+      groups.push(group);
     }
+    // メッセージの先頭・末尾や、同じ記事の分割 section 間には線を入れない。
+    if (ib.startsArticle && group.blocks.length > 0) group.blocks.push({ type: "divider" });
+    group.blocks.push(ib.block);
+    group.texts.push(ib.text);
+    if (ib.pageId) group.pageIds.push(ib.pageId);
+    group.chars += ib.text.length;
   }
 
-  const total = groups.length;
-  return groups.map((group, idx) => {
-    const headerText =
-      total > 1
-        ? `${DIGEST_HEADER}: ${input.count}件 (${idx + 1}/${total})`
-        : `${DIGEST_HEADER}: ${input.count}件`;
-    const blocks: unknown[] = [
-      {
-        type: "header",
-        text: { type: "plain_text", text: truncate(headerText, HEADER_TITLE_MAX), emoji: true },
-      },
-      ...group.texts.map((text) => ({ type: "section", text: { type: "mrkdwn", text } })),
-    ];
+  return groups.map((group) => {
     const fallback = truncate(
-      `${headerText}\n${group.texts.map((text) => markdownToPlainText(text).replace(/<([^>|]+)\|([^>]+)>/g, "$2: $1")).join("\n\n")}`,
+      group.texts
+        .map((text) => markdownToPlainText(text).replace(/<([^>|]+)\|([^>]+)>/g, "$2: $1"))
+        .join("\n\n"),
       FALLBACK_TEXT_MAX,
     );
-    return { message: { text: fallback, blocks }, pageIds: group.pageIds };
+    return { message: { text: fallback, blocks: group.blocks }, pageIds: group.pageIds };
   });
 }
 
-/** 要約の装飾を取り除き、Slack 本文と通知プレビューで読める文章にする。 */
+type RichInline =
+  | {
+      type: "text";
+      text: string;
+      style?: { bold?: boolean; italic?: boolean; strike?: boolean; code?: boolean };
+    }
+  | { type: "link"; url: string; text?: string };
+
+/** mrkdwn のリスト行を Slack の rich_text_list として組み立てる。 */
+function summaryToBlocks(
+  text: string,
+  codeState: { inCode: boolean },
+): { text: string; block: unknown }[] {
+  const result: { text: string; block: unknown }[] = [];
+  let paragraphs: string[] = [];
+  let list: string[] = [];
+  let listStyle: "bullet" | "ordered" = "bullet";
+  let listOffset = 0;
+  const flushParagraphs = () => {
+    const value = paragraphs.join("\n");
+    if (value.trim())
+      result.push({
+        text: value,
+        block: { type: "section", text: { type: "mrkdwn", text: value } },
+      });
+    paragraphs = [];
+  };
+  const flushList = () => {
+    if (list.length) {
+      result.push({
+        text: list
+          .map(
+            (item, index) =>
+              `${listStyle === "bullet" ? "•" : `${listOffset + index + 1}.`} ${item}`,
+          )
+          .join("\n"),
+        block: {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_list",
+              style: listStyle,
+              ...(listStyle === "ordered" && listOffset > 0 ? { offset: listOffset } : {}),
+              elements: list.map((item) => ({
+                type: "rich_text_section",
+                elements: parseRichInline(item),
+              })),
+            },
+          ],
+        },
+      });
+    }
+    list = [];
+  };
+  for (const line of text.split("\n")) {
+    const fence = /^\s*```/.test(line);
+    const match =
+      codeState.inCode || fence ? null : line.match(/^\s*(?:([•*+-])\s+|(\d+)\.\s+)(.+)$/);
+    if (fence) codeState.inCode = !codeState.inCode;
+    if (match) {
+      const style = match[2] ? "ordered" : "bullet";
+      if (list.length && style !== listStyle) flushList();
+      flushParagraphs();
+      if (!list.length) {
+        listStyle = style;
+        listOffset = match[2] ? Number(match[2]) - 1 : 0;
+      }
+      list.push(match[3]);
+    } else {
+      flushList();
+      paragraphs.push(line);
+    }
+  }
+  flushList();
+  flushParagraphs();
+  return result;
+}
+
+/** リスト項目のリンクとインライン装飾を rich text の要素へ変換する。 */
+function parseRichInline(text: string): RichInline[] {
+  const result: RichInline[] = [];
+  const pattern =
+    /<((?:https?:\/\/)[^>|]+)(?:\|([^>]+))?>|`([^`\n]+)`|\*([^*\n]+)\*|_([^_\n]+)_|~([^~\n]+)~/g;
+  let cursor = 0;
+  const decode = (value: string) =>
+    value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index;
+    if (index > cursor) result.push({ type: "text", text: decode(text.slice(cursor, index)) });
+    if (match[1])
+      result.push({
+        type: "link",
+        url: decode(match[1]),
+        ...(match[2] ? { text: decode(match[2]) } : {}),
+      });
+    else {
+      const value = match[3] ?? match[4] ?? match[5] ?? match[6];
+      const style = match[3]
+        ? { code: true }
+        : match[4]
+          ? { bold: true }
+          : match[5]
+            ? { italic: true }
+            : { strike: true };
+      result.push({ type: "text", text: decode(value), style });
+    }
+    cursor = index + match[0].length;
+  }
+  if (cursor < text.length) result.push({ type: "text", text: decode(text.slice(cursor)) });
+  return result;
+}
+
+/** 要約の装飾を取り除き、通知プレビューで読める文章にする。 */
 export function markdownToPlainText(markdown: string): string {
   return markdownToMrkdwn(markdown)
     .replace(/```(?:[^\n`]*\n)?([\s\S]*?)```/g, "$1")
@@ -194,16 +298,16 @@ export function markdownToPlainText(markdown: string): string {
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)")
     .replace(/\*+([^*\n]+)\*+/g, "$1")
     .replace(/_+([^_\n]+)_+/g, "$1")
-    .replace(/~~([^~\n]+)~~/g, "$1");
+    .replace(/~+([^~\n]+)~+/g, "$1");
 }
 
 /**
  * Markdown を Slack mrkdwn へ変換する (spec §13)。
- * fenced code block の内側は変換せず維持する。
+ * fenced code block とインラインコードの内側は変換せず維持する。
  */
 export function markdownToMrkdwn(markdown: string): string {
-  // ```...``` を捕捉して分割。奇数インデックスが code block。
-  const segments = markdown.split(/(```[\s\S]*?```)/g);
+  // コードを捕捉して分割。奇数インデックスは変換しない。
+  const segments = markdown.split(/(```[\s\S]*?```|`[^`\n]+`)/g);
   return segments
     .map((segment, index) => (index % 2 === 1 ? segment : convertNonCode(segment)))
     .join("");
@@ -223,6 +327,8 @@ function convertNonCode(text: string): string {
 
   // 強調記法を Slack 形式へ。
   let result = converted.replace(/\*\*([^*]+)\*\*/g, "*$1*").replace(/__([^_]+)__/g, "_$1_");
+  result = result.replace(/~~([^~\n]+)~~/g, "~$1~");
+  result = result.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, "<$2|$1>");
 
   // `\1` `\2` のような番号プレースホルダを連番へ補正する。
   let counter = 0;

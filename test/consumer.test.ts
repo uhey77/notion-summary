@@ -363,7 +363,7 @@ describe("ダイジェストフェーズ (runDailyDigest)", () => {
     const bodies = postBodies(ctx.fetchMock);
     expect(bodies).toHaveLength(1); // 1通にまとまる
     const rendered = JSON.stringify(bodies[0].blocks);
-    expect(rendered).toContain("今日の更新記事: 2件");
+    expect(rendered).not.toContain("今日の更新記事");
     expect(rendered).toContain("記事A");
     expect(rendered).toContain("記事B");
     expect(rendered).toContain("山田");
