@@ -44,6 +44,13 @@ export async function processDuePage(state: PageSummary, deps: SummaryDeps): Pro
 
   const jobId = (await repository.getLatestJobByPage(pageId))?.id;
   let lockAcquired = true;
+  // 要約せずに終える。ページの状態更新でロックも外れる。
+  const skip = async (status: "skipped" | "completed", reason: SkipReason): Promise<void> => {
+    await repository.markPageStatus({ pageId, status, now: nowIso });
+    lockAcquired = false;
+    await skipJob(deps, jobId, reason, nowIso);
+    logger.info(`skip: ${reason}`, { page_id: pageId });
+  };
   try {
     if (jobId) {
       await repository.updateJobStatus({
@@ -69,38 +76,24 @@ export async function processDuePage(state: PageSummary, deps: SummaryDeps): Pro
 
     // 対象 DB フィルタ (Webhook から Cron へ移動)。
     if (!belongsToDatabase(info.parentDatabaseId, config.notionDatabaseId)) {
-      await repository.markPageStatus({ pageId, status: "skipped", now: nowIso });
-      lockAcquired = false;
-      await skipJob(deps, jobId, "other_database", nowIso);
-      logger.info("skip: other_database", { page_id: pageId });
+      await skip("skipped", "other_database");
       return;
     }
 
     // 重複防止: 前回要約した版と同じ last_edited_time なら、内容が変わっていない → スキップ。
     if (fresh.hasSummarizedVersion(info.lastEditedTime)) {
-      await repository.markPageStatus({ pageId, status: "completed", now: nowIso });
-      lockAcquired = false;
-      await skipJob(deps, jobId, "no_change", nowIso);
-      logger.info("skip: no_change", { page_id: pageId });
+      await skip("completed", "no_change");
       return;
     }
 
     // 本文取得 → 空ならスキップ。
     const content = await source.getPageContent(pageId);
     if (content.markdown.trim().length === 0) {
-      await repository.markPageStatus({ pageId, status: "skipped", now: nowIso });
-      lockAcquired = false;
-      await skipJob(deps, jobId, "empty_body", nowIso);
-      logger.info("skip: empty_body", { page_id: pageId });
+      await skip("skipped", "empty_body");
       return;
     }
 
-    // カテゴリ = 親 DB タイトル (取得失敗は致命的でない)。
-    let category = "未分類";
-    if (info.parentDatabaseId) {
-      const title = await safe(() => source.getDatabaseTitle(info.parentDatabaseId as string));
-      if (title) category = title;
-    }
+    const category = await resolveCategory(source, info.parentDatabaseId);
 
     // 要約サービスの一時失敗は下のcatchで再試行する。
     const summary = await summarizer.summarize({
@@ -108,11 +101,7 @@ export async function processDuePage(state: PageSummary, deps: SummaryDeps): Pro
       category,
       markdown: content.markdown,
     });
-    // 最終更新者名を解決 (last_edited_by は partial user=id のみ → Users API で名前を引く)。
-    // 失敗しても要約は止めず「不明」にフォールバックする。
-    const author = info.lastEditedById
-      ? (await safe(() => source.getUserName(info.lastEditedById as string))) || "不明"
-      : "不明";
+    const author = await resolveAuthor(source, info.lastEditedById);
 
     // 要約結果とダイジェスト表示用メタを D1 に保存 (status=summarized)。Slack 投稿はダイジェスト側。
     // 処理中に新しい Webhook で debounce_until が変わっていれば pending のまま残す (取りこぼし防止)。
@@ -140,6 +129,26 @@ export async function processDuePage(state: PageSummary, deps: SummaryDeps): Pro
   } catch (error) {
     await handleFailure(error, deps, jobId, state, nowIso, lockAcquired);
   }
+}
+
+type SkipReason = "other_database" | "no_change" | "empty_body";
+
+/** カテゴリ = 親 DB タイトル。取得失敗は致命的でないため「未分類」にする。 */
+async function resolveCategory(
+  source: PageSource,
+  databaseId: string | undefined,
+): Promise<string> {
+  if (!databaseId) return "未分類";
+  return (await safe(() => source.getDatabaseTitle(databaseId))) || "未分類";
+}
+
+/**
+ * 最終更新者名を解決する (last_edited_by は partial user=id のみ → Users API で名前を引く)。
+ * 失敗しても要約は止めず「不明」にフォールバックする。
+ */
+async function resolveAuthor(source: PageSource, userId: string | undefined): Promise<string> {
+  if (!userId) return "不明";
+  return (await safe(() => source.getUserName(userId))) || "不明";
 }
 
 async function handleFailure(
